@@ -106,6 +106,17 @@ jobs:
         with:
           submodules: recursive
 
+      # Build the tip of the branch named in .gitmodules
+      # (submodule.dependencies/rkdeveloptool.branch) instead of the pinned
+      # gitlink commit, so CI always picks up the latest branch changes without
+      # a pointer bump. `sync` copies the .gitmodules branch into .git/config;
+      # `update --remote` fetches and checks out that branch's tip.
+      - name: Track rkdeveloptool branch tip
+        run: |
+          git submodule sync -- dependencies/rkdeveloptool
+          git submodule update --remote -- dependencies/rkdeveloptool
+          echo "rkdeveloptool @ $(git -C dependencies/rkdeveloptool rev-parse --short HEAD) ($(git -C dependencies/rkdeveloptool log -1 --format=%s))"
+
       - name: Build rkdeveloptool + stage artifacts
         env:
           OS_LABEL: ${{ matrix.os_label }}

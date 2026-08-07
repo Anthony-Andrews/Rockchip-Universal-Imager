@@ -305,7 +305,7 @@ verify() {
     echo "  portable.yml / installer.yml (Tauri + rkdeveloptool)"
     echo
     echo "Next (in the repo):"
-    echo "  git submodule update --init --recursive"
+    echo "  git submodule update --init --remote --recursive  # --remote: rkdeveloptool branch tip (see .gitmodules)"
     echo "  # rkdeveloptool: ./autogen.sh && ./configure && make"
     echo "  cargo tauri build --no-bundle --target aarch64-apple-darwin"
     echo "  # and/or: --target x86_64-apple-darwin"

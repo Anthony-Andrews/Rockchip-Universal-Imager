@@ -1,3 +1,4 @@
 [submodule "dependencies/rkdeveloptool"]
 	path = dependencies/rkdeveloptool
 	url = https://github.com/Lux-Robotics/rkdeveloptool.git
+	branch = rkdeveloptool-multidevice

@@ -327,7 +327,7 @@ verify() {
     fi
     echo
     echo "Next (in the repo):"
-    echo "  git submodule update --init --recursive"
+    echo "  git submodule update --init --remote --recursive  # --remote: rkdeveloptool branch tip (see .gitmodules)"
     if [[ "$IS_AARCH64_HOST" -eq 1 ]]; then
       echo "  cargo tauri build --no-bundle --target aarch64-unknown-linux-gnu"
     else
