@@ -25,8 +25,9 @@ const LOADER_MAP: &[LoaderMapEntry] = &[
     LoaderMapEntry { vid: 0x2207, pid: 0x300a, soc: "RK3066", filename: Some("RK3066Loader_miniall.bin") },
     LoaderMapEntry { vid: 0x2207, pid: 0x300b, soc: "RK3168", filename: Some("RK3168Loader_miniall.bin") },
     LoaderMapEntry { vid: 0x2207, pid: 0x301a, soc: "RK3036", filename: Some("rk3036_loader_v1.11.257.bin") },
-    // RK3066B has no recipe of its own; RK310BMINIALL (RK3188 family) is the closest match. Unverified on hardware.
-    LoaderMapEntry { vid: 0x2207, pid: 0x310a, soc: "RK3066B", filename: none },
+    // RK3066B has no recipe of its own; the RK3188-family loader is a plausible
+    // match but is unverified on hardware, so it is left unsupported for now.
+    LoaderMapEntry { vid: 0x2207, pid: 0x310a, soc: "RK3066B", filename: None },
     LoaderMapEntry { vid: 0x2207, pid: 0x310b, soc: "RK3188", filename: Some("rk3188_loader_v2.00.200.bin") },
     LoaderMapEntry { vid: 0x2207, pid: 0x310c, soc: "RK3126/RK3128", filename: Some("rk3128_loader_v2.12.263.bin") },
     LoaderMapEntry { vid: 0x2207, pid: 0x310d, soc: "RK3126", filename: Some("rk3126_loader_v2.09.263.bin") },

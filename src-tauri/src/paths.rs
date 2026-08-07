@@ -154,6 +154,8 @@ pub fn resource_dir() -> PathBuf {
 
 /// loader_binaries next to app, in resources, or from repo during dev.
 pub fn loader_binaries_dir() -> PathBuf {
+    // `mut` is only used on macOS (the cfg block below inserts entries).
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut candidates = vec![
         // Bundled inside .app (preferred on macOS)
         resource_dir().join("loader_binaries"),
