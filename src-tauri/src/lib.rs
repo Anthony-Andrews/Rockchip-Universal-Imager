@@ -139,6 +139,29 @@ mod app {
         );
     }
 
+    /// Deliver an OS file drop (single .img) to the UI, mirroring the shape the
+    /// `select_image_file` command returns.
+    pub fn on_image_file_dropped(app: &AppHandle, path: &str, size_bytes: u64) {
+        let p = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".into());
+        eval(
+            app,
+            &format!(
+                "window.onImageFileDropped && window.onImageFileDropped({{success:true, path:{p}, sizeBytes:{size_bytes}}})"
+            ),
+        );
+    }
+
+    /// Drive the drag-and-drop overlay. `active` shows/hides it; `valid` picks
+    /// the accept vs reject styling while a drag hovers.
+    pub fn on_image_drag_state(app: &AppHandle, active: bool, valid: bool) {
+        eval(
+            app,
+            &format!(
+                "window.onImageDragState && window.onImageDragState({{active:{active}, valid:{valid}}})"
+            ),
+        );
+    }
+
     pub fn on_driver_install_complete(app: &AppHandle, success: bool, error: &str) {
         let err = serde_json::to_string(error).unwrap_or_else(|_| "\"\"".into());
         eval(
@@ -744,11 +767,13 @@ mod app {
                 error: "device is not connected".into(),
             };
         }
-        logging::write_line("[app] Disconnect: resetting device");
+        logging::write_line("[app] Disconnect: resetting device to maskrom");
+        // `rd 3` = RST_RESETMASKROM_SUBCODE: reset back into maskrom rather than
+        // a plain `rd` (subcode 0), which would reboot into normal flash boot.
         if !start_flash_task(
             app,
             state.inner().clone(),
-            vec!["rd".into()],
+            vec!["rd".into(), "3".into()],
             false,
             true,
             None,
@@ -1370,11 +1395,45 @@ pub fn run() {
             tracing::info!(target: "app", "launched");
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Destroyed => {
                 usb::stop();
                 let _ = window;
             }
+            // Native OS file drop. HTML5 drag/drop events do not fire in the
+            // webview while Tauri's native drag-drop is enabled, so the hover
+            // overlay must also be driven from here.
+            tauri::WindowEvent::DragDrop(dnd) => {
+                // A single .img is the only thing the drop handler will accept.
+                let accepts = |paths: &[std::path::PathBuf]| {
+                    matches!(paths, [p] if p
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("img")))
+                };
+                match dnd {
+                    tauri::DragDropEvent::Enter { paths, .. } => {
+                        app::on_image_drag_state(window.app_handle(), true, accepts(paths));
+                    }
+                    tauri::DragDropEvent::Leave => {
+                        app::on_image_drag_state(window.app_handle(), false, false);
+                    }
+                    tauri::DragDropEvent::Drop { paths, .. } => {
+                        // Always clear the overlay, even for a rejected drop.
+                        app::on_image_drag_state(window.app_handle(), false, false);
+                        if accepts(paths) {
+                            let path = &paths[0];
+                            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                            app::on_image_file_dropped(
+                                window.app_handle(),
+                                &path.to_string_lossy(),
+                                size,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

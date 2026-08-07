@@ -19,3 +19,38 @@ button:disabled {
     cursor: not-allowed;
     opacity: 0.7;
 }
+
+/* File drag-and-drop overlay. Shown only while a drag hovers the window;
+   `active`/`reject` are toggled from the native drag events (see app.js). */
+#dropOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+    background: rgba(17, 17, 17, 0.85);
+    border: 3px dashed #2a6fd9;
+    box-sizing: border-box;
+    /* The overlay must never intercept the OS drop itself. */
+    pointer-events: none;
+}
+
+#dropOverlay.active {
+    display: flex;
+}
+
+#dropOverlay.reject {
+    border-color: #a33;
+}
+
+#dropOverlayText {
+    font-size: 20px;
+    color: #cde;
+    padding: 24px 32px;
+    border-radius: 8px;
+}
+
+#dropOverlay.reject #dropOverlayText {
+    color: #e88;
+}

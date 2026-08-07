@@ -717,6 +717,24 @@ window.onImageFileDropped = (result) => {
     applyImageSelection(result.path, pickField(result, "sizeBytes", "size_bytes") || 0);
 };
 
+// Native drag-drop hover feedback. Fired from Rust because HTML5 drag events
+// don't reach the webview while native drag-drop is enabled.
+window.onImageDragState = (state) => {
+    const overlay = document.getElementById("dropOverlay");
+    if (!overlay) {
+        return;
+    }
+    // Never show the overlay mid-flash - a drop would be ignored anyway.
+    const active = !!(state && state.active) && !flashRunning;
+    const reject = active && !(state && state.valid);
+    overlay.classList.toggle("active", active);
+    overlay.classList.toggle("reject", reject);
+    const text = document.getElementById("dropOverlayText");
+    if (text) {
+        text.textContent = reject ? "Drop a single .img file" : "Drop .img to select";
+    }
+};
+
 // Anything the native drop overlay doesn't claim must not fall through to
 // the webview's default behavior (navigating to the dropped file).
 window.addEventListener("dragover", (event) => event.preventDefault());
