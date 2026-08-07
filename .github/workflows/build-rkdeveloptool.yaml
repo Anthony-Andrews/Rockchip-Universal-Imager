@@ -155,6 +155,19 @@ jobs:
           need make
           need pkg-config || need pkgconf
 
+          # Sorted list of DLLs a PE imports. Prefer llvm-objdump: MSYS2's binutils
+          # objdump on an x64 host cannot read the cross-built aarch64 PE.
+          win_imports() {
+            local tool
+            for tool in llvm-objdump objdump; do
+              if command -v "$tool" >/dev/null 2>&1; then
+                "$tool" -p "$1" 2>/dev/null | sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p' | sort -fu
+                return 0
+              fi
+            done
+            return 1
+          }
+
           # ------------------------------------------------------------------
           # Select CC/CXX for target
           # ------------------------------------------------------------------
@@ -185,11 +198,17 @@ jobs:
                   export CXX=g++
                 fi
                 CONFIGURE_HOST="--host=x86_64-w64-mingw32"
+                # Without this the exe imports libstdc++-6/libgcc_s_seh-1/libwinpthread-1
+                # and only runs where MSYS2's /mingw64/bin is on PATH.
+                export LDFLAGS="${LDFLAGS:-} -static"
                 ;;
               windows-aarch64)
                 export CC="${CC:-aarch64-w64-mingw32-gcc}"
                 export CXX="${CXX:-aarch64-w64-mingw32-g++}"
                 CONFIGURE_HOST="--host=aarch64-w64-mingw32"
+                # llvm-mingw's runtime is libc++ + libunwind; without -static the exe
+                # imports libunwind.dll and libc++.dll.
+                export LDFLAGS="${LDFLAGS:-} -static"
                 ;;
               macos-x86_64)
                 export CC="${CC:-clang}"
@@ -396,9 +415,28 @@ jobs:
               echo "ldd / readelf:"
               ldd "$STAGE/rkdeveloptool" 2>/dev/null || readelf -d "$STAGE/rkdeveloptool" 2>/dev/null || true
             elif [[ "$OS_LABEL" == "windows" ]]; then
-              echo "Note: libusb static-linked; no libusb-1.0.dll required beside the exe."
+              echo "DLL imports:"
+              win_imports "$STAGE/rkdeveloptool.exe" || echo "(no objdump available)"
             fi
           } >"$STAGE/BUILD.txt"
+
+          # A Windows exe that imports a toolchain runtime DLL only runs where that
+          # DLL happens to be on PATH - i.e. on the build machine. Catch it here
+          # rather than in a user's bug report.
+          if [[ "$OS_LABEL" == "windows" ]]; then
+            imports="$(win_imports "$STAGE/rkdeveloptool.exe" || true)"
+            if [[ -z "$imports" ]]; then
+              echo "ERROR: cannot read DLL imports (need llvm-objdump or objdump)" >&2
+              exit 1
+            fi
+            bad="$(echo "$imports" | grep -iE '^(libunwind|libc\+\+|libstdc\+\+|libgcc|libwinpthread|libusb)' || true)"
+            if [[ -n "$bad" ]]; then
+              echo "ERROR: exe imports non-system runtime DLLs:" >&2
+              echo "$bad" >&2
+              echo "LDFLAGS was: ${LDFLAGS:-<empty>}" >&2
+              exit 1
+            fi
+          fi
 
           echo "==== staged ===="
           cat "$STAGE/BUILD.txt"

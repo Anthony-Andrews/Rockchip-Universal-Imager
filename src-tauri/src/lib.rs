@@ -686,7 +686,9 @@ mod app {
                     &app,
                     false,
                     false,
-                    &format!("no loader mapping for VID 0x{vid:04X} PID 0x{pid:04X}"),
+                    &format!(
+                        "unrecognized device (VID 0x{vid:04X} PID 0x{pid:04X}) - not a supported Rockchip SoC"
+                    ),
                 );
                 return;
             };
@@ -697,7 +699,7 @@ mod app {
                     false,
                     false,
                     &format!(
-                        "no loader bundled for {} - add its SPL loader to loader_binaries/",
+                        "{} is not supported - no loader is available for this SoC",
                         entry.soc
                     ),
                 );
