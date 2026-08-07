@@ -101,20 +101,23 @@ jobs:
             cross: true
 
     steps:
+      # Submodules are fetched in a separate step, not by actions/checkout. Its
+      # built-in fetch is shallow (--depth=1) and hardcodes refs/heads/master
+      # when the branch isn't in .git/config; our fork has no master branch, so
+      # it throws a (recoverable) error every run. A plain, non-shallow
+      # `git submodule update --init` finds the pinned commit on any branch.
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          submodules: recursive
+          submodules: false
 
-      # Build the tip of the branch named in .gitmodules
-      # (submodule.dependencies/rkdeveloptool.branch) instead of the pinned
-      # gitlink commit, so CI always picks up the latest branch changes without
-      # a pointer bump. `sync` copies the .gitmodules branch into .git/config;
-      # `update --remote` fetches and checks out that branch's tip.
-      - name: Track rkdeveloptool branch tip
+      # Check out the exact rkdeveloptool commit pinned by the superproject
+      # gitlink (standard, reproducible submodule behavior). To move the pin:
+      #   git -C dependencies/rkdeveloptool fetch && git -C dependencies/rkdeveloptool checkout <sha>
+      #   git add dependencies/rkdeveloptool && git commit
+      - name: Check out pinned rkdeveloptool
         run: |
-          git submodule sync -- dependencies/rkdeveloptool
-          git submodule update --remote -- dependencies/rkdeveloptool
+          git submodule update --init -- dependencies/rkdeveloptool
           echo "rkdeveloptool @ $(git -C dependencies/rkdeveloptool rev-parse --short HEAD) ($(git -C dependencies/rkdeveloptool log -1 --format=%s))"
 
       - name: Build rkdeveloptool + stage artifacts
