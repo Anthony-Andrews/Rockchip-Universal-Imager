@@ -16,3 +16,7 @@ src-tauri/gen/
 # Local env
 .env
 .env.*
+
+# Nix
+result
+result-*

@@ -1,0 +1,48 @@
+# Build the Nix package (flake.nix) from source in a clean sandbox.
+#
+# Independent of the self-hosted matrix: runs on a GitHub-hosted runner, needs
+# no bootstrap. Also serves as a clean-room canary — if this passes, the app
+# builds with nothing but declared dependencies (no Homebrew/MSYS leakage).
+#
+# Covers x86_64-linux. aarch64-linux users build from the same flake locally.
+
+name: Nix
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: nix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: nix build (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Flake check (evaluate all systems)
+        run: nix flake check --all-systems --no-build
+
+      - name: Build package
+        run: nix build -L .#rockchip-universal-imager
+
+      - name: Inspect result
+        run: |
+          set -euo pipefail
+          echo "== closure =="
+          ls -la result/bin/
+          test -x result/bin/rockchip-universal-imager
+          test -e result/bin/rkdeveloptool
+          test -d result/bin/loader_binaries
+          test -f result/lib/udev/rules.d/70-rockchip-usb.rules
+          result/bin/rkdeveloptool --version || true

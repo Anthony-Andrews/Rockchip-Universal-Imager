@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1786599213,
+        "narHash": "sha256-yNJd40f11EzXBjSByCB7IPpeFFAdeoSKKM67dGkfFoU=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "0e251e24a4f24e036a084b6b4b2d2491af4167f4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "rkdeveloptool-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786141604,
+        "narHash": "sha256-w66OA6LY0893SjAZU5qse7XUgpAhAk5ayt0q4blPCec=",
+        "owner": "Anthony-Andrews",
+        "repo": "rkdeveloptool",
+        "rev": "0f5a2e3be76ce1878d65b35fd197b454c6a9068b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Anthony-Andrews",
+        "repo": "rkdeveloptool",
+        "rev": "0f5a2e3be76ce1878d65b35fd197b454c6a9068b",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "rkdeveloptool-src": "rkdeveloptool-src"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
