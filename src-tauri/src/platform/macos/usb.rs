@@ -2,7 +2,7 @@
 
 use crate::platform::flashing::{Kind, Status};
 
-pub use crate::platform::libusb_hotplug::{start, stop, UsbCallback};
+pub use crate::platform::libusb_hotplug::{start, stop, UsbCallback, UsbDevice};
 
 pub fn query() -> Status {
     Status {

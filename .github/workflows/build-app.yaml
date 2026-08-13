@@ -93,7 +93,7 @@ jobs:
           OS_LABEL: ${{ matrix.os_label }}
         run: |
           set -euo pipefail
-          source packaging/ci/ci-env.sh
+          source self-host-ci/sanitize.sh
           cd "$(ci_workspace)"
           ci_setup_toolchain_path "$OS_LABEL"
           ci_ensure_rust "${{ matrix.rust_target }}"
@@ -111,7 +111,7 @@ jobs:
           OS_LABEL: ${{ matrix.os_label }}
         run: |
           set -euo pipefail
-          source packaging/ci/ci-env.sh
+          source self-host-ci/sanitize.sh
           cd "$(ci_workspace)"
           ci_setup_toolchain_path "$OS_LABEL"
           ci_ensure_cargo_path
@@ -145,7 +145,7 @@ jobs:
           APP_NAME: ${{ matrix.app_name }}
         run: |
           set -euo pipefail
-          source packaging/ci/ci-env.sh
+          source self-host-ci/sanitize.sh
           WS="$(ci_workspace)"
           cd "$WS"
           ci_setup_toolchain_path "$OS_LABEL"
@@ -199,7 +199,7 @@ jobs:
               mv "$OUT/$(basename "$APP_PATH")" "$OUT/Rockchip Universal Imager.app"
             fi
             # Keep execute bits for the staged artifact (Actions zip can still
-            # drop them on download — package-cell.sh restores them again).
+            # drop them on download — the package job restores them again).
             STAGED_APP="$OUT/Rockchip Universal Imager.app"
             find "$STAGED_APP/Contents/MacOS" -type f -exec chmod u+x {} + 2>/dev/null || true
             if command -v codesign >/dev/null 2>&1; then

@@ -5,8 +5,8 @@
 # that can use Homebrew (not root).
 # Self-hosted selection: [self-hosted, macOS, X64] (any hostname, e.g. MacOS-Sequoia-CICD)
 #
-#   bash packaging/macos/bootstrap-build-deps.sh
-#   bash packaging/macos/bootstrap-build-deps.sh --skip-tauri-cli
+#   bash self-host-ci/macos/bootstrap-build-deps.sh
+#   bash self-host-ci/macos/bootstrap-build-deps.sh --skip-tauri-cli
 #
 # ---------------------------------------------------------------------------
 # Runner expectations (workflows assume these are pre-installed)

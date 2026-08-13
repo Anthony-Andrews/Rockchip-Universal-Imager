@@ -20,6 +20,77 @@ button:disabled {
     opacity: 0.7;
 }
 
+/* ---- Per-device cards ---- */
+.device-card {
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: #191919;
+}
+.dev-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+.dev-dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #a33;
+    flex: 0 0 auto;
+}
+.dev-title {
+    font-weight: 600;
+}
+.dev-status {
+    color: #bbb;
+    font-size: 13px;
+    margin-left: auto;
+    text-align: right;
+}
+.dev-progress {
+    width: 100%;
+    height: 8px;
+    margin: 4px 0 8px 0;
+}
+.dev-controls {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.dev-controls select,
+.dev-controls button {
+    font-size: 13px;
+    padding: 3px 8px;
+}
+.dev-msg {
+    color: #8cf;
+    font-size: 12px;
+    min-height: 16px;
+    margin-top: 6px;
+    word-break: break-word;
+}
+.dev-msg.err {
+    color: #e05b5b;
+}
+
+/* Per-device operation result (shown in the card, not a popup). */
+.dev-result {
+    color: #2fa84f;
+    font-size: 12px;
+    margin-top: 4px;
+    word-break: break-word;
+}
+.dev-result:empty {
+    margin-top: 0;
+}
+.dev-result.err {
+    color: #e05b5b;
+}
+
 /* File drag-and-drop overlay. Shown only while a drag hovers the window;
    `active`/`reject` are toggled from the native drag events (see app.js). */
 #dropOverlay {

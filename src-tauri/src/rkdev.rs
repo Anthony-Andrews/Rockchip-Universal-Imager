@@ -18,8 +18,60 @@ pub struct ProcessResult {
     pub error_message: String,
 }
 
-pub fn tool_available() -> bool {
-    paths::rkdeveloptool_path().is_ok()
+/// `["-l", "0x<loc>"]` for a target device, else empty. Prepended to a
+/// rkdeveloptool invocation so per-device commands target one board when several
+/// are attached (requires the patched rkdeveloptool with -l support). Passed
+/// explicitly per call so independent operations can run concurrently on
+/// different devices. LocationID = (bus << 8) | port, never 0 for a real device.
+fn selector_prefix(location: Option<u32>) -> Vec<String> {
+    match location {
+        Some(loc) if loc != 0 => vec!["-l".to_string(), format!("0x{loc:x}")],
+        _ => Vec::new(),
+    }
+}
+
+fn with_selector(location: Option<u32>, args: &[&str]) -> Vec<String> {
+    let mut full = selector_prefix(location);
+    full.extend(args.iter().map(|s| s.to_string()));
+    full
+}
+
+// Child-process enumeration via `ld`. Only used on Windows (which has no libusb
+// hotplug context); macOS/Linux enumerate in-process — see usb::list_devices.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub location: u32,
+    pub vid: u16,
+    pub pid: u16,
+    /// "Maskrom" | "Loader" | "Unknown" (as reported by `ld`).
+    pub mode: String,
+}
+
+/// Enumerate every attached rockusb device via `ld`. Runs WITHOUT the -l
+/// selector (we want the full list, not one device), so it never depends on the
+/// current selection.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn list_devices() -> Vec<DeviceInfo> {
+    let (_res, out) = capture(None, &["ld".to_string()], Some(PROBE_TIMEOUT));
+    // e.g. "DevNo=1\tVid=0x2207,Pid=0x350b,LocationID=0x1\tMaskrom"
+    let Ok(re) = regex::Regex::new(
+        r"(?i)Vid=0x([0-9a-f]+),Pid=0x([0-9a-f]+),LocationID=0x([0-9a-f]+)\s+(\S+)",
+    ) else {
+        return Vec::new();
+    };
+    let mut devices = Vec::new();
+    for line in out.lines() {
+        if let Some(c) = re.captures(line) {
+            devices.push(DeviceInfo {
+                vid: u16::from_str_radix(&c[1], 16).unwrap_or(0),
+                pid: u16::from_str_radix(&c[2], 16).unwrap_or(0),
+                location: u32::from_str_radix(&c[3], 16).unwrap_or(0),
+                mode: c[4].to_string(),
+            });
+        }
+    }
+    devices
 }
 
 fn strip_ansi(line: &str) -> String {
@@ -50,7 +102,7 @@ fn is_progress_line(line: &str) -> bool {
     line.contains('%') || (line.contains("total") && line.contains("current"))
 }
 
-fn emit_lines(buffer: &mut String, on_line: &dyn Fn(String)) {
+fn emit_lines(buffer: &mut String, on_line: &dyn Fn(String), location: Option<u32>) {
     loop {
         let Some(pos) = buffer.find(['\r', '\n']) else {
             break;
@@ -64,9 +116,9 @@ fn emit_lines(buffer: &mut String, on_line: &dyn Fn(String)) {
         buffer.drain(..erase);
         let clean = strip_ansi(&line);
         if is_progress_line(&clean) {
-            logging::write_progress("rkdev", &clean);
+            logging::write_progress(&rkdev_category(location), &clean);
         } else if !clean.is_empty() {
-            logging::write_line(&format!("[rkdev] {clean}"));
+            logging::write_line(&format!("{} {clean}", rkdev_prefix(location)));
         }
         on_line(clean);
     }
@@ -77,14 +129,18 @@ fn emit_lines(buffer: &mut String, on_line: &dyn Fn(String)) {
 /// storage target the loader doesn't have) hangs the UI forever.
 pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Run rkdeveloptool to completion (optional kill-on-timeout).
-pub fn run_sync(args: &[&str], timeout: Option<std::time::Duration>) -> ProcessResult {
-    run_sync_output_timeout(args, timeout).0
+/// Run rkdeveloptool to completion (optional kill-on-timeout), scoped to `location`.
+pub fn run_sync(
+    location: Option<u32>,
+    args: &[&str],
+    timeout: Option<std::time::Duration>,
+) -> ProcessResult {
+    run_sync_output_timeout(location, args, timeout).0
 }
 
 /// Like [`run_sync_output_timeout`] with [`PROBE_TIMEOUT`].
-pub fn run_sync_output(args: &[&str]) -> (ProcessResult, String) {
-    run_sync_output_timeout(args, Some(PROBE_TIMEOUT))
+pub fn run_sync_output(location: Option<u32>, args: &[&str]) -> (ProcessResult, String) {
+    run_sync_output_timeout(location, args, Some(PROBE_TIMEOUT))
 }
 
 fn format_command_line(args: &[impl AsRef<str>]) -> String {
@@ -94,17 +150,71 @@ fn format_command_line(args: &[impl AsRef<str>]) -> String {
         .join(" ")
 }
 
+/// Log category for a device-scoped call, e.g. "rkdev 0x101" (or "rkdev" when
+/// not scoped), so every rkdeveloptool line in the log names its target device.
+fn rkdev_category(location: Option<u32>) -> String {
+    match location {
+        Some(l) => format!("rkdev 0x{l:x}"),
+        None => "rkdev".to_string(),
+    }
+}
+
+fn rkdev_prefix(location: Option<u32>) -> String {
+    format!("[{}]", rkdev_category(location))
+}
+
 /// Log the exact rkdeveloptool invocation (every path: sync probes + async tasks).
-pub fn log_command(args: &[impl AsRef<str>]) {
+pub fn log_command(location: Option<u32>, args: &[impl AsRef<str>]) {
     logging::write_line(&format!(
-        "[rkdev] $ rkdeveloptool {}",
+        "{} $ rkdeveloptool {}",
+        rkdev_prefix(location),
         format_command_line(args)
     ));
 }
 
+/// True if the output is an open/claim failure ("Creating Comm Object failed").
+/// These are transient on macOS — the device is briefly not openable (just
+/// enumerated, or another handle settling) — and usually succeed on retry.
+pub fn is_open_failure(output: &str) -> bool {
+    output.to_lowercase().contains("comm object failed")
+}
+
+/// How many times to re-run a command whose only problem was a transient open
+/// failure, and how long to wait between tries.
+const OPEN_RETRIES: u32 = 4;
+const OPEN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Run rkdeveloptool, capture combined stdout/stderr, kill if `timeout` elapses.
+/// Prepends the device selector (`-l <loc>`) so the probe targets `location`.
+/// Retries transient "Creating Comm Object failed" open errors.
 pub fn run_sync_output_timeout(
+    location: Option<u32>,
     args: &[&str],
+    timeout: Option<std::time::Duration>,
+) -> (ProcessResult, String) {
+    let full = with_selector(location, args);
+    let mut last = capture(location, &full, timeout);
+    let mut attempt = 1;
+    while attempt < OPEN_RETRIES && is_open_failure(&last.1) {
+        logging::write_line(&format!(
+            "{} open failed, retrying ({}/{})",
+            rkdev_prefix(location),
+            attempt,
+            OPEN_RETRIES - 1
+        ));
+        thread::sleep(OPEN_RETRY_DELAY);
+        last = capture(location, &full, timeout);
+        attempt += 1;
+    }
+    last
+}
+
+/// Core spawn+capture. `args` are passed to rkdeveloptool verbatim (already
+/// including any selector prefix); `location` is only used to tag log lines with
+/// the target device.
+fn capture(
+    location: Option<u32>,
+    args: &[String],
     timeout: Option<std::time::Duration>,
 ) -> (ProcessResult, String) {
     let path = match paths::rkdeveloptool_path() {
@@ -121,7 +231,7 @@ pub fn run_sync_output_timeout(
         }
     };
 
-    log_command(args);
+    log_command(location, args);
 
     let mut cmd = Command::new(&path);
     cmd.args(args)
@@ -201,13 +311,14 @@ pub fn run_sync_output_timeout(
     for line in combined.lines() {
         let clean = strip_ansi(line);
         if !clean.is_empty() && !is_progress_line(&clean) {
-            logging::write_line(&format!("[rkdev] {clean}"));
+            logging::write_line(&format!("{} {clean}", rkdev_prefix(location)));
         }
     }
 
     if timed_out {
         logging::write_line(&format!(
-            "[rkdev] timed out after {:?} ({})",
+            "{} timed out after {:?} ({})",
+            rkdev_prefix(location),
             timeout.unwrap_or_default(),
             args.join(" ")
         ));
@@ -258,10 +369,17 @@ impl RkdevTask {
 
 /// Start rkdeveloptool on a background thread; stream lines via callback.
 pub fn start(
+    location: Option<u32>,
     args: Vec<String>,
     on_line: impl Fn(String) + Send + Sync + 'static,
     on_exit: impl Fn(ProcessResult) + Send + Sync + 'static,
 ) -> Result<Arc<RkdevTask>, String> {
+    // Prepend the device selector so db/wl/rd/etc. target `location`.
+    let args = {
+        let mut full = selector_prefix(location);
+        full.extend(args);
+        full
+    };
     let path = paths::rkdeveloptool_path()?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
@@ -272,7 +390,7 @@ pub fn start(
         join: Mutex::new(None),
     });
 
-    log_command(&args);
+    log_command(location, &args);
 
     let handle = thread::spawn(move || {
         let mut command = Command::new(&path);
@@ -326,13 +444,13 @@ pub fn start(
                             Ok(0) => break,
                             Ok(n) => {
                                 buffer.push_str(&String::from_utf8_lossy(&chunk[..n]));
-                                emit_lines(&mut buffer, &*on_line);
+                                emit_lines(&mut buffer, &*on_line, location);
                             }
                             Err(_) => break,
                         }
                     }
                     if !buffer.is_empty() {
-                        emit_lines(&mut buffer, &*on_line);
+                        emit_lines(&mut buffer, &*on_line, location);
                         if !buffer.is_empty() {
                             on_line(strip_ansi(&buffer));
                         }
@@ -348,7 +466,7 @@ pub fn start(
                     let reader = std::io::BufReader::new(err);
                     for line in reader.lines().flatten() {
                         let clean = strip_ansi(&line);
-                        logging::write_line(&format!("[rkdev] {clean}"));
+                        logging::write_line(&format!("{} {clean}", rkdev_prefix(location)));
                         on_line(clean);
                     }
                 }
@@ -434,7 +552,7 @@ fn is_all_zero(buf: &[u8], offset: usize, size: usize) -> bool {
         .unwrap_or(true)
 }
 
-pub fn read_sectors(begin: u64, count: u64) -> Option<Vec<u8>> {
+pub fn read_sectors(location: Option<u32>, begin: u64, count: u64) -> Option<Vec<u8>> {
     let temp = temp_probe_path();
     let _ = fs::remove_file(&temp);
     let args = [
@@ -443,7 +561,7 @@ pub fn read_sectors(begin: u64, count: u64) -> Option<Vec<u8>> {
         &count.to_string(),
         temp.to_str()?,
     ];
-    let result = run_sync(&args, Some(PROBE_TIMEOUT));
+    let result = run_sync(location, &args, Some(PROBE_TIMEOUT));
     if result.exit_code != 0 || result.was_cancelled {
         let _ = fs::remove_file(&temp);
         return None;
@@ -461,8 +579,8 @@ pub struct GptInfo {
     pub last_used_lba: u64,
 }
 
-pub fn read_gpt_info() -> Option<GptInfo> {
-    let buf = read_sectors(0, GPT_PROBE_SECTORS)?;
+pub fn read_gpt_info(location: Option<u32>) -> Option<GptInfo> {
+    let buf = read_sectors(location, 0, GPT_PROBE_SECTORS)?;
     if buf.len() < (SECTOR_SIZE * 2) as usize {
         return None;
     }
@@ -502,7 +620,7 @@ fn looks_blank(buf: &[u8]) -> bool {
 }
 
 /// Binary-search approximate used-sector boundary (matches C++ behavior).
-pub fn find_used_sector_boundary(total_sectors: u64) -> u64 {
+pub fn find_used_sector_boundary(location: Option<u32>, total_sectors: u64) -> u64 {
     const PRECISION: u64 = 204_800; // 0.1 GiB @ 512 B
     const PROBE: u64 = 16;
 
@@ -510,7 +628,7 @@ pub fn find_used_sector_boundary(total_sectors: u64) -> u64 {
     let mut hi = total_sectors;
     while hi - lo > PRECISION {
         let mid = lo + (hi - lo) / 2;
-        let blank = read_sectors(mid, PROBE)
+        let blank = read_sectors(location, mid, PROBE)
             .map(|b| looks_blank(&b))
             .unwrap_or(false);
         if blank {

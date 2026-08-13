@@ -2,7 +2,7 @@
 # Thin wrapper: run the PowerShell Windows bootstrap from Git Bash / MSYS2.
 #
 # Prefer elevated PowerShell for a full install:
-#   powershell -ExecutionPolicy Bypass -File packaging/windows/bootstrap-build-deps.ps1
+#   powershell -ExecutionPolicy Bypass -File self-host-ci/windows/bootstrap-build-deps.ps1
 #
 # This script just re-invokes that .ps1 with the same flags.
 #
@@ -14,7 +14,7 @@ PS1="$ROOT/bootstrap-build-deps.ps1"
 if [[ ! -f "$PS1" ]]; then
   echo "Missing $PS1" >&2
   echo "Run this from the repo copy, e.g.:" >&2
-  echo "  bash packaging/windows/bootstrap-build-deps.sh" >&2
+  echo "  bash self-host-ci/windows/bootstrap-build-deps.sh" >&2
   echo "Do not nano a partial copy into \$HOME." >&2
   exit 1
 fi

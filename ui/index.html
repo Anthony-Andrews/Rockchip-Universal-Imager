@@ -7,57 +7,24 @@
     <link rel="stylesheet" href="app.css" />
 </head>
 <body>
-    <div style="max-width:640px; width:100%; padding:24px;">
-        <h1 style="margin:0 0 16px 0;">Rockchip Universal Imager</h1>
-
-        <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
-            <div id="statusDot" style="width:12px; height:12px; border-radius:50%; background:#a33;"></div>
-            <div id="statusText">disconnected</div>
-            <div id="infoIcon" title="" style="margin-left:auto; width:20px; height:20px; border-radius:50%; border:1px solid #777; display:flex; align-items:center; justify-content:center; font-size:12px; color:#bbb;">i</div>
-        </div>
-
-        <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
-            <select id="storageSelector" aria-label="Storage target" title="Select storage target" disabled>
-                <option value="1" title="not detected">eMMC</option>
-                <option value="2" title="not detected">SD card</option>
-                <option value="9" title="not detected">SPI NOR</option>
-            </select>
-            <div id="storageInfo" style="color:#8cf; min-height:20px;"></div>
-            <button id="calculateUsed" style="font-size:12px; padding:2px 8px;">Calculate Used Space</button>
-        </div>
-        <div id="driverStatus" style="color:#bbb; margin-top:8px; min-height:20px;"></div>
-        <div id="flashStatus" style="color:#bbb; margin-top:8px; min-height:20px;"></div>
+    <div style="max-width:720px; width:100%; padding:24px;">
         <div id="errorStatus" style="color:#e05b5b; margin-top:4px; min-height:20px; word-break:break-word;"></div>
 
-        <div style="display:flex; gap:8px; margin-top:16px; flex-wrap:wrap;">
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center;">
             <button id="installDriver">Install device access</button>
+            <div id="driverStatus" style="color:#bbb; min-height:20px;"></div>
         </div>
 
-        <div style="display:flex; gap:8px; margin-top:16px; flex-wrap:wrap;">
-            <button id="connectDevice" style="display:none; background:#2a6fd9; color:white;">Connect</button>
+        <h2 style="font-size:15px; color:#bbb; margin:20px 0 8px 0;">Devices</h2>
+        <div id="deviceList"></div>
+        <div id="noDevices" style="color:#888;">No Rockchip devices detected. Put a board into maskrom/loader mode and connect it over USB.</div>
+
+        <!-- Shared image: one selection flashed to whichever devices you choose.
+             Show Log sits at the right end of the same row. -->
+        <div style="display:flex; gap:8px; margin-top:20px; align-items:center; flex-wrap:wrap;">
             <button id="selectImage">Select .img</button>
-            <button id="flashImage">Flash storage</button>
-            <button id="backupStorage">Backup storage</button>
-            <button id="eraseStorage" style="background:#a33; color:white;">Quick Erase</button>
-            <button id="cancelFlash" style="display:none; background:#a33; color:white;">Cancel</button>
-        </div>
-
-        <div id="selectedImage" style="color:#888; margin-top:8px; word-break:break-all;">No image selected</div>
-        <div style="margin-top:8px;">
-            <progress id="flashProgress" max="100" value="0" style="width:100%;"></progress>
-        </div>
-
-        <div style="display:flex; gap:8px; margin-top:16px; flex-wrap:wrap;">
-            <button id="toggleAdvanced">Show Advanced Options</button>
-            <button id="toggleLog">Show Log</button>
-        </div>
-        <div id="advancedPanel" style="display:none; margin-top:12px; padding:12px; border:1px solid #444; border-radius:8px;">
-            <div id="secureEraseDescription" style="color:#888; font-size:13px; margin-bottom:8px;">
-                Secure Erase overwrites the entire selected storage target with zeros. Unlike Quick Erase (which only issues the
-                device's native erase command and isn't guaranteed to destroy data on all hardware), this
-                physically overwrites every sector - but takes significantly longer.
-            </div>
-            <button id="secureEraseStorage" style="background:#a33; color:white;">Secure Erase</button>
+            <div id="selectedImage" style="color:#888; word-break:break-all; min-width:0;">No image selected</div>
+            <button id="toggleLog" style="margin-left:auto; background:none; border:none; color:#777; font-size:12px; padding:2px 4px; cursor:pointer; text-decoration:underline; white-space:nowrap;">Show Log</button>
         </div>
 
         <div id="logPanel" style="display:none; margin-top:16px;">

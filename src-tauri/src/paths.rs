@@ -163,7 +163,7 @@ pub fn loader_binaries_dir() -> PathBuf {
         executable_dir().join("loader_binaries"),
         // Beside .app / portable root
         companion_dir().join("loader_binaries"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../loader_binaries"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dependencies/loader_binaries"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("loader_binaries"),
     ];
 

@@ -27,8 +27,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 
 # Unix: libusb C via rusb for hotplug (D4 try-everywhere; primary targets macOS/Linux).
+# "vendored" builds libusb from source and links it statically, so the shipped
+# app has no external dylib dependencies (packaging requirement).
 [target.'cfg(unix)'.dependencies]
-rusb = { version = "0.9", features = [] }
+rusb = { version = "0.9", features = ["vendored"] }
 
 [features]
 default = []

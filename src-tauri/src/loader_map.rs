@@ -49,7 +49,3 @@ const LOADER_MAP: &[LoaderMapEntry] = &[
 pub fn entry_for(vid: u16, pid: u16) -> Option<&'static LoaderMapEntry> {
     LOADER_MAP.iter().find(|e| e.vid == vid && e.pid == pid)
 }
-
-pub fn soc_name(vid: u16, pid: u16) -> Option<&'static str> {
-    entry_for(vid, pid).map(|e| e.soc)
-}

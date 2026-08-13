@@ -1,39 +1,30 @@
-let lastInfo = "";
-let lastStatus = "disconnected";
-let lastSoc = "";
-let driverInstallRunning = false;
-let flashRunning = false;
+// ---- Shared / global UI state ----
 let selectedImagePath = "";
+let selectedImageBytes = 0;
+let devices = [];                 // latest DeviceEntry[] pushed from the host
+let dependencyWarning = "";
+let runtimeError = "";
+let driverInstallRunning = false;
+let quitPromptShowing = false;
 let logVisible = false;
-let advancedVisible = false;
 let logLoaded = false;
 let logCleared = false;
-let calculatingUsedSpace = false;
-let quitPromptShowing = false;
-let storageTargets = null;
 const driverDeviceName = "Rockchip Bootloader Device";
 
-const statusDot = document.getElementById("statusDot");
-const statusText = document.getElementById("statusText");
-const storageInfo = document.getElementById("storageInfo");
-const storageSelector = document.getElementById("storageSelector");
-const infoIcon = document.getElementById("infoIcon");
-const driverStatus = document.getElementById("driverStatus");
-const installDriver = document.getElementById("installDriver");
-const flashStatus = document.getElementById("flashStatus");
+// Per-device capacity/used cache, keyed by "location:storage".
+const storageInfoCache = {};
+// Per-device last-operation result message, keyed by location: {text, ok}.
+const deviceResults = {};
+// Locations that have been successfully flashed this session (→ show Reboot).
+const deviceFlashed = {};
+
 const errorStatus = document.getElementById("errorStatus");
-const flashProgress = document.getElementById("flashProgress");
-const connectDevice = document.getElementById("connectDevice");
+const installDriver = document.getElementById("installDriver");
+const driverStatus = document.getElementById("driverStatus");
 const selectImage = document.getElementById("selectImage");
-const flashImage = document.getElementById("flashImage");
-const eraseStorage = document.getElementById("eraseStorage");
-const secureEraseStorage = document.getElementById("secureEraseStorage");
-const toggleAdvanced = document.getElementById("toggleAdvanced");
-const advancedPanel = document.getElementById("advancedPanel");
-const backupStorage = document.getElementById("backupStorage");
-const calculateUsed = document.getElementById("calculateUsed");
-const cancelFlash = document.getElementById("cancelFlash");
 const selectedImage = document.getElementById("selectedImage");
+const deviceList = document.getElementById("deviceList");
+const noDevices = document.getElementById("noDevices");
 const toggleLog = document.getElementById("toggleLog");
 const logPanel = document.getElementById("logPanel");
 const liveLog = document.getElementById("liveLog");
@@ -47,86 +38,48 @@ const confirmCancelBtn = document.getElementById("confirmCancelBtn");
 const alertModal = document.getElementById("alertModal");
 const alertMessage = document.getElementById("alertMessage");
 const alertOkBtn = document.getElementById("alertOkBtn");
-// Tauri bridge: camelCase method names map to snake_case command ids.
-// Argument object keys stay camelCase — Tauri 2 defaults to camelCase IPC
-// keys (image_path → imagePath), not snake_case.
+
+// Tauri bridge: camelCase method names map to snake_case command ids. Every
+// device command takes a numeric `location` (USB LocationID) first.
 function createTauriApi() {
     const core = window.__TAURI__ && window.__TAURI__.core;
     if (!core || !core.invoke) {
         return null;
     }
     const invoke = core.invoke.bind(core);
-    const names = [
-        "uiReady",
-        "getLogContents",
-        "openLogDirectory",
-        "getPlatform",
-        "getDependencyStatus",
-        "getDeviceAccessInfo",
-        "installDeviceAccess",
-        "selectImageFile",
-        "selectBackupDestination",
-        "flashBootloader",
-        "disconnectDevice",
-        "flashImage",
-        "eraseStorage",
-        "secureEraseStorage",
-        "backupStorage",
-        "cancelFlash",
-        "forceCloseWindow",
-        "getStorageInfo",
-        "getStorageTargets",
-        "selectStorage",
-        "calculateUsedSpace",
-    ];
-    const api = {};
-    for (const name of names) {
+    const call = (name, argObj) => {
         const cmd = name.replace(/[A-Z]/g, (ch) => "_" + ch.toLowerCase());
-        api[name] = (...args) => {
-            if (args.length === 0) {
-                return invoke(cmd);
-            }
-            if (name === "flashImage") {
-                return invoke(cmd, { imagePath: args[0] });
-            }
-            if (name === "selectStorage") {
-                return invoke(cmd, { storage: args[0] });
-            }
-            if (name === "backupStorage") {
-                return invoke(cmd, { destPath: args[0], force: !!args[1] });
-            }
-            if (name === "installDeviceAccess") {
-                return invoke(cmd, { deviceName: args[0] || "" });
-            }
-            return invoke(cmd, { args });
-        };
-    }
-    return api;
+        return invoke(cmd, argObj);
+    };
+    return {
+        uiReady: () => call("uiReady"),
+        getLogContents: () => call("getLogContents"),
+        openLogDirectory: () => call("openLogDirectory"),
+        getPlatform: () => call("getPlatform"),
+        getDependencyStatus: () => call("getDependencyStatus"),
+        getDeviceAccessInfo: () => call("getDeviceAccessInfo"),
+        installDeviceAccess: (name) => call("installDeviceAccess", { deviceName: name || "" }),
+        selectImageFile: () => call("selectImageFile"),
+        selectBackupDestination: () => call("selectBackupDestination"),
+        forceCloseWindow: () => call("forceCloseWindow"),
+        listDevices: () => call("listDevices"),
+        flashBootloader: (location) => call("flashBootloader", { location }),
+        disconnectDevice: (location) => call("disconnectDevice", { location }),
+        rebootDevice: (location) => call("rebootDevice", { location }),
+        flashImage: (location, imagePath) => call("flashImage", { location, imagePath }),
+        eraseStorage: (location) => call("eraseStorage", { location }),
+        secureEraseStorage: (location) => call("secureEraseStorage", { location }),
+        backupStorage: (location, destPath, force) => call("backupStorage", { location, destPath, force: !!force }),
+        cancelFlash: (location) => call("cancelFlash", { location }),
+        getStorageInfo: (location) => call("getStorageInfo", { location }),
+        getStorageTargets: (location) => call("getStorageTargets", { location }),
+        selectStorage: (location, storage) => call("selectStorage", { location, storage }),
+        calculateUsedSpace: (location) => call("calculateUsedSpace", { location }),
+    };
 }
 const api = createTauriApi();
 
-let currentOperation = null;
-// Captured when an operation starts so completion messages name the storage
-// target that was actually operated on, even if the selection changes later.
-let currentOperationStorageLabel = "eMMC";
-let dependencyWarning = "";
-let runtimeError = "";
-
-function storageLabel(storage) {
-    switch (Number(storage)) {
-    case 1:
-        return "eMMC";
-    case 2:
-        return "SD card";
-    case 9:
-        return "SPI NOR";
-    default:
-        return "storage";
-    }
-}
-
-// Tauri serializes #[serde(rename_all = "camelCase")] command results, so
-// prefer camelCase and keep snake_case as a fallback for older hosts.
+// ---- small helpers ----
 function pickField(obj, ...keys) {
     if (!obj) {
         return undefined;
@@ -139,18 +92,6 @@ function pickField(obj, ...keys) {
     return undefined;
 }
 
-function selectedStorageValue() {
-    const selected = pickField(storageTargets, "selectedStorage", "selected_storage");
-    if (selected) {
-        return Number(selected);
-    }
-    return storageSelector ? Number(storageSelector.value) : 1;
-}
-
-function selectedStorageLabel() {
-    return storageLabel(selectedStorageValue());
-}
-
 function basename(path) {
     if (!path) {
         return "";
@@ -159,151 +100,37 @@ function basename(path) {
     return idx >= 0 ? path.slice(idx + 1) : path;
 }
 
-// Errors get their own line instead of sharing flashStatus with the progress
-// animation, which used to overwrite them on the next status tick.
-function showError(message) {
-    runtimeError = message || "";
-    errorStatus.textContent = runtimeError || dependencyWarning;
-    errorStatus.style.color = "#e05b5b";
-}
-
-function setDependencyWarning(message) {
-    dependencyWarning = message || "";
-    errorStatus.textContent = runtimeError || dependencyWarning;
-    errorStatus.style.color = "#e05b5b";
-}
-
-function storageBytesFromInfo(info) {
-    if (!info) {
-        return 0;
-    }
-    return Number(pickField(info, "storageBytes", "storage_bytes", "emmcBytes", "emmc_bytes") || 0);
-}
-
 function formatGiB(bytes) {
     const gib = Number(bytes || 0) / (1024 * 1024 * 1024);
     const digits = gib >= 100 ? 0 : (gib >= 10 ? 1 : 2);
     return gib.toFixed(digits) + " GiB";
 }
 
-// Storage line state: sizes display as GiB with the raw byte counts in the
-// tooltip. null means unknown/not yet read.
-let storageTotalBytes = null;
-let storageUsedBytes = null;
-
-function renderStorageInfoLine() {
-    const storage = selectedStorageValue();
-    // Device size and used space are shown independently: whichever is known
-    // renders as GiB with its exact byte count in the tooltip, so a computed
-    // used-space value is never hidden just because the total isn't known yet.
-    const parts = [];
-    const titleParts = [];
-
-    if (storageTotalBytes !== null) {
-        parts.push(formatGiB(storageTotalBytes));
-        titleParts.push(storageTotalBytes.toLocaleString() + " bytes total");
-    } else {
-        parts.push("unknown");
-    }
-
-    if (calculatingUsedSpace) {
-        parts.push("Calculating...");
-    } else if (storageUsedBytes !== null) {
-        parts.push("Used: " + formatGiB(storageUsedBytes));
-        titleParts.push(storageUsedBytes.toLocaleString() + " bytes used");
-    }
-
-    storageInfo.textContent = storageLabel(storage) + ": " + parts.join("  ·  ");
-    storageInfo.title = titleParts.join("  ·  ");
-}
-
-function storageTargetAvailable(targets, storage) {
+function storageLabel(storage) {
     switch (Number(storage)) {
-    case 1:
-        return !!(pickField(targets, "emmcAvailable", "emmc_available"));
-    case 2:
-        return !!(pickField(targets, "sdAvailable", "sd_available"));
-    case 9:
-        return !!(pickField(targets, "spinorAvailable", "spinor_available"));
-    default:
-        return false;
+    case 1: return "eMMC";
+    case 2: return "SD card";
+    case 9: return "SPI NOR";
+    default: return "storage";
     }
 }
 
-function availableStorageEntries(targets) {
-    if (!targets || !targets.success) {
-        return [];
-    }
-    const entries = [];
-    if (storageTargetAvailable(targets, 1)) {
-        entries.push({ value: 1, label: "eMMC" });
-    }
-    if (storageTargetAvailable(targets, 2)) {
-        entries.push({ value: 2, label: "SD card" });
-    }
-    if (storageTargetAvailable(targets, 9)) {
-        entries.push({ value: 9, label: "SPI NOR" });
-    }
-    return entries;
+function storageOptionsFromMask(mask) {
+    const out = [];
+    if (mask & (1 << 0)) out.push({ value: 1, label: "eMMC" });
+    if (mask & (1 << 1)) out.push({ value: 2, label: "SD card" });
+    if (mask & (1 << 2)) out.push({ value: 9, label: "SPI NOR" });
+    return out;
 }
 
-function renderStorageSelector() {
-    if (!storageSelector) {
-        return;
-    }
-
-    const entries = availableStorageEntries(storageTargets);
-    const enabledValues = new Set(entries.map((entry) => String(entry.value)));
-
-    for (const option of storageSelector.options) {
-        const available = enabledValues.has(option.value);
-        option.disabled = !available;
-        option.title = available ? "" : "not detected";
-    }
-
-    const selectedRaw = pickField(storageTargets, "selectedStorage", "selected_storage");
-    const selected = selectedRaw ? String(selectedRaw) : storageSelector.value;
-    if (enabledValues.has(selected)) {
-        storageSelector.value = selected;
-    }
-    const noStorageDevices = !!(storageTargets && !storageTargets.success);
-    storageSelector.disabled = flashRunning || (lastStatus !== "connected" && !noStorageDevices);
+function showError(message) {
+    runtimeError = message || "";
+    errorStatus.textContent = runtimeError || dependencyWarning;
 }
 
-async function refreshStorageTargets() {
-    if (!api || !api.getStorageTargets) {
-        return;
-    }
-    try {
-        const targets = await api.getStorageTargets();
-        storageTargets = targets || null;
-    } catch (error) {
-        storageTargets = null;
-    }
-    if (storageTargets && !storageTargets.success) {
-        flashStatus.textContent = "no storage devices detected";
-    } else if (flashStatus.textContent === "no storage devices detected") {
-        flashStatus.textContent = "";
-    }
-    renderStorageSelector();
-    render();
-}
-
-// Both the "connected" status transition and a completed flash task ask for
-// the same storage refresh at nearly the same moment; a second caller while
-// one is in flight would just duplicate the rkdeveloptool round-trips, so
-// coalesce them onto the in-flight promise.
-let storageRefreshInFlight = null;
-function scheduleStorageRefresh() {
-    if (storageRefreshInFlight) {
-        return storageRefreshInFlight;
-    }
-    storageRefreshInFlight = refreshStorageTargets()
-        .then(refreshStorageInfo)
-        .finally(() => {
-            storageRefreshInFlight = null;
-        });
-    return storageRefreshInFlight;
+function setDependencyWarning(message) {
+    dependencyWarning = message || "";
+    errorStatus.textContent = runtimeError || dependencyWarning;
 }
 
 function showConfirm(message) {
@@ -328,8 +155,6 @@ function showConfirm(message) {
         confirmOkBtn.addEventListener("click", onOk);
         confirmCancelBtn.addEventListener("click", onCancel);
         document.addEventListener("keydown", onKey);
-        // Focus the safe choice: Enter/Space activate it, Tab reaches
-        // Confirm, Escape backs out.
         confirmCancelBtn.focus();
     });
 }
@@ -356,224 +181,598 @@ function showAlert(message) {
     });
 }
 
-function render() {
-    const connected = lastStatus === "connected";
-    const detected = lastStatus === "detected";
-    const toolMissing = lastStatus === "tool_missing";
-    const dependenciesMissing = dependencyWarning.length > 0;
-    const noStorageDevices = !!(storageTargets && !storageTargets.success);
-    statusDot.style.background = connected ? "#2fa84f" : (detected ? "#2a6fd9" : (toolMissing ? "#d9822b" : "#a33"));
-    const socSuffix = (lastSoc && (connected || detected)) ? " (" + lastSoc + ")" : "";
-    statusText.textContent = toolMissing ? "rkdeveloptool not found" : ((detected ? "detected" : lastStatus) + socSuffix);
-    flashImage.disabled = flashRunning || !connected || !selectedImagePath || noStorageDevices || dependenciesMissing;
-    flashImage.textContent = "Flash " + selectedStorageLabel();
-    eraseStorage.disabled = flashRunning || !connected || noStorageDevices || dependenciesMissing;
-    secureEraseStorage.disabled = flashRunning || !connected || noStorageDevices || dependenciesMissing;
-    backupStorage.disabled = flashRunning || !connected || noStorageDevices || dependenciesMissing;
-    backupStorage.textContent = "Backup " + selectedStorageLabel();
-    calculateUsed.disabled = flashRunning || !connected || calculatingUsedSpace || noStorageDevices || dependenciesMissing;
-    connectDevice.style.display = (connected || detected) ? "inline-block" : "none";
-    connectDevice.textContent = connected ? "Disconnect" : "Connect";
-    connectDevice.style.background = connected ? "#a33" : "#2a6fd9";
-    connectDevice.disabled = flashRunning || noStorageDevices || dependenciesMissing;
-    cancelFlash.style.display = flashRunning ? "inline-block" : "none";
-    if (toggleAdvanced) {
-        toggleAdvanced.disabled = noStorageDevices;
+// ---- device list rendering ----
+function deviceById(location) {
+    return devices.find((d) => d.location === location);
+}
+
+function socLabel(d) {
+    const soc = d.soc && d.soc !== "unknown" ? d.soc : "unknown SoC";
+    return soc + " @ " + d.locationHex;
+}
+
+function opVerb(op) {
+    switch (op) {
+    case "connect": return "connecting";
+    case "disconnect": return "disconnecting";
+    case "reboot": return "rebooting";
+    case "flash": return "flashing";
+    case "erase": return "erasing";
+    case "secure_erase": return "secure erasing";
+    case "backup": return "backing up";
+    default: return "working";
     }
-    if (toggleLog) {
-        toggleLog.disabled = noStorageDevices;
+}
+
+// Which ops report real byte-progress (→ progress bar). The rest (connect/
+// disconnect/erase) have no meaningful percentage, so they show animated dots.
+function opHasProgress(op) {
+    return op === "flash" || op === "secure_erase" || op === "backup";
+}
+
+// Animated ellipsis for no-progress ops: . → .. → ...
+let dotTimer = null;
+let dotCount = 1;
+
+function anyDotOpsRunning() {
+    return devices.some((d) => d.running && !opHasProgress(d.currentOp));
+}
+
+function ensureDotTimer() {
+    if (anyDotOpsRunning() && !dotTimer) {
+        dotTimer = setInterval(() => {
+            dotCount = dotCount >= 3 ? 1 : dotCount + 1;
+            paintDotStatuses();
+        }, 400);
+    } else if (!anyDotOpsRunning() && dotTimer) {
+        clearInterval(dotTimer);
+        dotTimer = null;
+        dotCount = 1;
     }
-    if (copyLog) {
-        copyLog.disabled = noStorageDevices;
+}
+
+function paintDotStatuses() {
+    for (const d of devices) {
+        if (d.running && !opHasProgress(d.currentOp)) {
+            const card = deviceList.querySelector('.device-card[data-location="' + d.location + '"]');
+            const st = card && card.querySelector(".dev-status");
+            if (st) {
+                st.textContent = opVerb(d.currentOp) + ".".repeat(dotCount);
+            }
+        }
     }
-    if (clearLog) {
-        clearLog.disabled = noStorageDevices;
+}
+
+function statusTextFor(d) {
+    if (!d.supported) {
+        return "unsupported";
     }
-    if (installDriver) {
-        installDriver.disabled = driverInstallRunning || noStorageDevices;
+    if (d.running) {
+        if (opHasProgress(d.currentOp)) {
+            const pct = d.progress >= 0 ? " " + d.progress + "%" : "";
+            return opVerb(d.currentOp) + pct;
+        }
+        // No progress bar for this op — animated dots instead.
+        return opVerb(d.currentOp) + ".".repeat(dotCount);
     }
-    if (connected || detected) {
-        const friendly = connected ? "device connected" : "device detected — press Connect";
-        infoIcon.title = lastInfo.trim() || friendly;
-    } else if (toolMissing) {
-        infoIcon.title = "rkdeveloptool is missing beside rockchip-universal-imager.app — keep it in the same folder as the app.";
-        if (!driverInstallRunning) {
-            driverStatus.textContent = "";
+    if (d.loaderReady) {
+        return "connected";
+    }
+    // Present but not connected — show a neutral "detected" rather than the raw
+    // USB mode (which reads "maskrom" even for a device with a loader).
+    return "detected";
+}
+
+function dotColor(d) {
+    if (!d.supported) return "#d9822b";
+    if (d.running) return "#2a6fd9";
+    if (d.loaderReady) return "#2fa84f";
+    return "#2a6fd9";
+}
+
+// Hover tooltip for a device: the raw `rfi` flash info captured once at connect.
+// (RAM/DDR size is not exposed by rkdeveloptool over USB, so it can't be shown
+// here — it's only printed on the device's UART during DDR init.)
+function deviceTooltip(d) {
+    return (d.flashInfo || "").trim();
+}
+
+// Rebuild the whole list. Called on structural pushes (device added/removed,
+// op start/stop, mode change) — never on progress ticks (those patch in place).
+function renderDeviceList() {
+    noDevices.style.display = devices.length === 0 ? "block" : "none";
+
+    const wanted = new Set(devices.map((d) => String(d.location)));
+    // Drop cards for devices that are gone.
+    for (const card of Array.from(deviceList.children)) {
+        if (!wanted.has(card.dataset.location)) {
+            card.remove();
+        }
+    }
+
+    for (const d of devices) {
+        let card = deviceList.querySelector('.device-card[data-location="' + d.location + '"]');
+        if (!card) {
+            card = document.createElement("div");
+            card.className = "device-card";
+            card.dataset.location = String(d.location);
+            deviceList.appendChild(card);
+        }
+        renderCard(card, d);
+    }
+    ensureDotTimer();
+}
+
+function renderCard(card, d) {
+    const busy = d.running;
+    const canConnect = d.supported && !busy && !d.loaderReady;
+    const canOp = d.loaderReady && !busy;
+    const storageOpts = storageOptionsFromMask(d.storageMask);
+
+    card.innerHTML = `
+        <div class="dev-head">
+            <span class="dev-dot"></span>
+            <span class="dev-title"></span>
+            <span class="dev-status"></span>
+        </div>
+        <progress class="dev-progress" max="100" value="0"></progress>
+        <div class="dev-controls"></div>
+        <div class="dev-msg"></div>
+        <div class="dev-result"></div>
+    `;
+    card.querySelector(".dev-dot").style.background = dotColor(d);
+    // Show the app's connection state: once connected the device is running our
+    // loader even if its USB descriptor still reads as maskrom (true on RK3588).
+    const modeLabel = d.loaderReady ? "Loader" : d.mode;
+    const title = card.querySelector(".dev-title");
+    title.textContent = socLabel(d) + " (" + modeLabel + ")";
+    // Hover tooltip: the flash info (rfi) captured once at connect. Prefix a
+    // friendly storage size when we know it.
+    title.title = deviceTooltip(d);
+    title.style.cursor = d.flashInfo ? "help" : "default";
+    card.querySelector(".dev-status").textContent = statusTextFor(d);
+
+    // Progress bar only for ops that report a real percentage; connect (loader
+    // download) and other no-progress ops show animated dots in the status text.
+    const prog = card.querySelector(".dev-progress");
+    const showBar = busy && opHasProgress(d.currentOp);
+    prog.style.display = showBar ? "block" : "none";
+    prog.value = d.progress >= 0 ? d.progress : 0;
+
+    const controls = card.querySelector(".dev-controls");
+
+    if (busy) {
+        controls.appendChild(makeButton("Cancel", "cancel", d.location, false, "#a33"));
+    } else if (!d.supported) {
+        // nothing actionable
+    } else if (!d.loaderReady) {
+        controls.appendChild(makeButton("Connect", "connect", d.location, false, "#2a6fd9"));
+    } else {
+        // Connected: storage picker + operations.
+        if (storageOpts.length > 0) {
+            const sel = document.createElement("select");
+            sel.className = "dev-storage";
+            sel.dataset.location = String(d.location);
+            for (const o of storageOpts) {
+                const opt = document.createElement("option");
+                opt.value = String(o.value);
+                opt.textContent = o.label;
+                if (o.value === d.selectedStorage) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            controls.appendChild(sel);
+        }
+        controls.appendChild(makeButton("Flash", "flash", d.location, !selectedImagePath, "#2a6fd9"));
+        // Offered once a flash has succeeded on this device: reboot into the
+        // freshly-flashed OS (rd 0), as opposed to Disconnect (rd 3 → maskrom).
+        if (deviceFlashed[d.location]) {
+            controls.appendChild(makeButton("Reboot", "reboot", d.location, false, "#2fa84f"));
+        }
+        controls.appendChild(makeButton("Backup", "backup", d.location, false));
+        controls.appendChild(makeButton("Calc Used", "calculate", d.location, false));
+        controls.appendChild(makeButton("Erase", "erase", d.location, false, "#a33"));
+        controls.appendChild(makeButton("Secure Erase", "secure_erase", d.location, d.selectedStorage === 0, "#a33"));
+        controls.appendChild(makeButton("Disconnect", "disconnect", d.location, false, "#a33"));
+    }
+
+    // Storage capacity / used space line (best-effort, cached).
+    const msg = card.querySelector(".dev-msg");
+    if (d.loaderReady && d.selectedStorage) {
+        const cached = storageInfoCache[d.location + ":" + d.selectedStorage];
+        msg.textContent = storageInfoLine(d.selectedStorage, cached);
+        if (!cached && !busy) {
+            fetchStorageInfo(d.location, d.selectedStorage);
         }
     } else {
-        infoIcon.title = "check usb";
-        if (!driverInstallRunning) {
-            driverStatus.textContent = "";
-        }
+        msg.textContent = "";
     }
-    if (storageSelector) {
-        storageSelector.disabled = flashRunning || (lastStatus !== "connected" && !noStorageDevices);
-        const selected = pickField(storageTargets, "selectedStorage", "selected_storage");
-        if (selected) {
-            storageSelector.value = String(selected);
-        }
-    }
-    if (noStorageDevices && !flashRunning) {
-        flashStatus.textContent = "no storage devices detected";
-    }
-    if (!connected) {
-        storageInfo.textContent = "";
-        storageInfo.title = "";
-    }
-}
 
-function setDriverInstallRunning(running) {
-    driverInstallRunning = running;
-    if (installDriver) {
-        installDriver.disabled = running;
-    }
-    if (running) {
-        driverStatus.textContent = "Installing... (this may take a while)";
-    }
-}
-
-let flashDotInterval = null;
-let flashDotCount = 0;
-let flashPercent = 0;
-let flashBaseLabel = "Flashing";
-
-function updateFlashStatusText() {
-    const dots = ".".repeat(flashDotCount);
-    // "Connecting" (bootloader download) doesn't report granular progress -
-    // showing a static "0%" the whole time would look broken rather than
-    // just quick, so only show the number for operations that actually
-    // report one.
-    const showPercent = currentOperation !== "connect";
-    flashStatus.textContent = flashBaseLabel + dots + (showPercent ? " " + flashPercent + "%" : "");
-}
-
-function startFlashAnimation(label) {
-    flashBaseLabel = label;
-    flashDotCount = 0;
-    flashPercent = 0;
-    updateFlashStatusText();
-    if (flashDotInterval) {
-        clearInterval(flashDotInterval);
-    }
-    flashDotInterval = setInterval(() => {
-        flashDotCount = (flashDotCount + 1) % 4;
-        updateFlashStatusText();
-    }, 400);
-}
-
-function stopFlashAnimation() {
-    if (flashDotInterval) {
-        clearInterval(flashDotInterval);
-        flashDotInterval = null;
-    }
-}
-
-function setFlashRunning(running) {
-    flashRunning = running;
-    selectImage.disabled = running;
-    if (running) {
-        showError("");
+    // Last-operation result message, shown in the card (not a popup). Hidden
+    // (but NOT deleted) while an op runs: the completion event that sets a new
+    // result can render before the not-busy device-list push arrives, and
+    // deleting here would drop that just-set message (a failure would then look
+    // silent). Every completion overwrites/clears deviceResults, so a stale
+    // message from a previous op can't linger.
+    const resultEl = card.querySelector(".dev-result");
+    const result = deviceResults[d.location];
+    if (result && !busy) {
+        resultEl.textContent = result.text;
+        resultEl.classList.toggle("err", !result.ok);
     } else {
-        stopFlashAnimation();
-        flashStatus.title = "";
+        resultEl.textContent = "";
+        resultEl.classList.remove("err");
     }
-    render();
+    void canConnect;
+    void canOp;
 }
 
-const platformReady = (api && api.getPlatform)
-    ? Promise.resolve(api.getPlatform()).catch(() => "")
-    : Promise.resolve("");
-
-async function refreshDependencyWarning() {
-    if (!api || !api.getDependencyStatus) {
-        setDependencyWarning("");
-        return;
+function storageInfoLine(storage, info) {
+    const parts = [storageLabel(storage) + ":"];
+    if (!info || info.totalBytes == null) {
+        parts.push("unknown size");
+    } else {
+        parts.push(formatGiB(info.totalBytes));
     }
-    try {
-        const status = await api.getDependencyStatus();
-        setDependencyWarning(status && status.warning ? status.warning : "");
-    } catch (error) {
-        setDependencyWarning("Required dependency is missing - keep the application files together and reinstall if needed.");
+    if (info && info.usedBytes != null) {
+        parts.push("· Used: " + formatGiB(info.usedBytes));
     }
+    return parts.join(" ");
 }
 
-async function refreshDriverInfo() {
-    if (!api || !api.getDeviceAccessInfo) {
-        return;
-    }
-    try {
-        const info = await api.getDeviceAccessInfo();
-        if (!info || info.kind === "none") {
-            return;
-        }
-        if (info.kind === "windows_driver") {
-            if (!pickField(info, "deviceRelevant", "device_relevant")) {
-                driverStatus.textContent = info.error || "device not found";
-                return;
-            }
-            if (info.ready) {
-                driverStatus.textContent = "Driver: " + (info.detail || "libusb-win32");
-            } else {
-                driverStatus.textContent = info.error || ("Driver: " + (info.detail || "unknown"));
-            }
-            return;
-        }
-        if (info.kind === "linux_udev") {
-            driverStatus.textContent = info.ready
-                ? "udev rules: installed"
-                : (info.error || "udev rules: not installed — flashing may need root");
-        }
-    } catch (error) {
-        // ignore; status line is best-effort
-    }
-}
-
-async function refreshStorageInfo() {
+async function fetchStorageInfo(location, storage) {
     if (!api || !api.getStorageInfo) {
         return;
     }
-    storageUsedBytes = null;
-    const selectedStorage = selectedStorageValue();
-    // getStorageInfo reports whatever target is currently selected (via rfi).
-    // SD capacity is not reliable from the loader — always show "unknown".
-    const available = storageTargets && storageTargets.success
-        && storageTargetAvailable(storageTargets, selectedStorage);
-    if (!available || selectedStorage === 2) {
-        storageTotalBytes = null;
-        renderStorageInfoLine();
-        return;
-    }
-    const info = await api.getStorageInfo();
-    storageTotalBytes = info.success ? storageBytesFromInfo(info) : null;
-    renderStorageInfoLine();
+    // SD capacity via rfi is unreliable; the backend returns unknown for it.
+    let total = null;
+    try {
+        const info = await api.getStorageInfo(location);
+        if (info && info.success) {
+            total = Number(pickField(info, "storageBytes", "storage_bytes") || 0) || null;
+        }
+    } catch (_) { /* best-effort */ }
+    const key = location + ":" + storage;
+    storageInfoCache[key] = Object.assign({ totalBytes: total, usedBytes: null }, storageInfoCache[key]);
+    patchStorageLine(location);
 }
 
-window.updateDeviceStatus = (status) => {
-    const changed = status !== lastStatus;
-    lastStatus = status;
-    render();
-    if (changed && status === "connected") {
-        refreshDriverInfo();
-        scheduleStorageRefresh();
+function patchStorageLine(location) {
+    const d = deviceById(location);
+    if (!d) return;
+    const card = deviceList.querySelector('.device-card[data-location="' + location + '"]');
+    if (!card) return;
+    const msg = card.querySelector(".dev-msg");
+    if (msg && !msg.classList.contains("err") && d.loaderReady && d.selectedStorage) {
+        msg.textContent = storageInfoLine(d.selectedStorage, storageInfoCache[location + ":" + d.selectedStorage]);
+    }
+}
+
+function makeButton(label, act, location, disabled, bg) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.dataset.act = act;
+    b.dataset.location = String(location);
+    b.disabled = !!disabled;
+    if (bg) {
+        b.style.background = bg;
+        b.style.color = "white";
+    }
+    return b;
+}
+
+// ---- host → UI device events ----
+window.updateDeviceList = (list) => {
+    devices = Array.isArray(list) ? list : [];
+    // Forget per-device state for devices that are gone.
+    const present = new Set(devices.map((d) => String(d.location)));
+    for (const loc of Object.keys(deviceResults)) {
+        if (!present.has(loc)) delete deviceResults[loc];
+    }
+    for (const loc of Object.keys(deviceFlashed)) {
+        if (!present.has(loc)) delete deviceFlashed[loc];
+    }
+    for (const key of Object.keys(storageInfoCache)) {
+        if (!present.has(key.split(":")[0])) delete storageInfoCache[key];
+    }
+    renderDeviceList();
+};
+
+// Frequent progress tick: patch one card without a rebuild.
+window.onDeviceProgress = (location, percent) => {
+    const card = deviceList.querySelector('.device-card[data-location="' + location + '"]');
+    if (!card) return;
+    const d = deviceById(location);
+    // No-progress ops (connect/etc.) show dots, not a bar — ignore stray ticks.
+    if (d && !opHasProgress(d.currentOp)) return;
+    const value = Math.max(0, Math.min(100, Number(percent) || 0));
+    const prog = card.querySelector(".dev-progress");
+    if (prog) {
+        prog.style.display = "block";
+        prog.value = value;
+    }
+    if (d) {
+        d.progress = value;
+        const st = card.querySelector(".dev-status");
+        if (st) st.textContent = statusTextFor(d);
     }
 };
 
-window.updateDeviceInfo = (info) => {
-    lastInfo = info || "";
-    render();
+// Operation results are shown as a message inside the device's own card (via
+// deviceResults), not as a modal popup. The host pushes a fresh device list
+// right after this fires, which re-renders the card and picks up the message.
+window.onDeviceOpComplete = (result) => {
+    const location = result && result.location;
+    const op = result && result.op;
+
+    if (result && result.cancelled) {
+        deviceResults[location] = { text: labelFor(op) + " canceled", ok: false };
+        renderDeviceList();
+        return;
+    }
+    if (!result || !result.success) {
+        const err = (result && result.error) || "operation failed";
+        deviceResults[location] = { text: labelFor(op) + " failed: " + err, ok: false };
+        renderDeviceList();
+        return;
+    }
+
+    // Success.
+    if (op === "flash") {
+        deviceFlashed[location] = true; // enable the Reboot button
+    } else if (op === "reboot" || op === "disconnect") {
+        delete deviceFlashed[location]; // device is leaving loader mode
+    }
+    const msg = successMessage(op);
+    if (msg) {
+        deviceResults[location] = { text: msg, ok: true };
+    } else {
+        delete deviceResults[location]; // e.g. connect — clear any stale message
+    }
+    renderDeviceList();
 };
 
-window.updateDeviceSoc = (soc) => {
-    lastSoc = soc || "";
-    render();
+function labelFor(op) {
+    switch (op) {
+    case "connect": return "Connect";
+    case "disconnect": return "Disconnect";
+    case "reboot": return "Reboot";
+    case "flash": return "Flash";
+    case "erase": return "Quick Erase";
+    case "secure_erase": return "Secure Erase";
+    case "backup": return "Backup";
+    default: return "Operation";
+    }
+}
+
+function successMessage(op) {
+    switch (op) {
+    case "flash": return "Flash completed";
+    case "erase": return "Quick Erase completed";
+    case "secure_erase": return "Secure Erase completed (overwritten with zeros)";
+    case "backup": return "Backup completed";
+    case "reboot": return "Rebooting…";
+    case "disconnect": return "Disconnected";
+    case "connect": return ""; // connecting is silent; the green dot is enough
+    default: return labelFor(op) + " completed";
+    }
+}
+
+// ---- per-device control actions (event-delegated) ----
+deviceList.addEventListener("click", async (event) => {
+    const btn = event.target.closest("button[data-act]");
+    if (!btn || btn.disabled) {
+        return;
+    }
+    const location = Number(btn.dataset.location);
+    const act = btn.dataset.act;
+    const d = deviceById(location);
+    if (!d || !api) {
+        return;
+    }
+    switch (act) {
+    case "connect":
+        await runStart(() => api.flashBootloader(location), "connect");
+        break;
+    case "disconnect":
+        await runStart(() => api.disconnectDevice(location), "disconnect");
+        break;
+    case "reboot":
+        await runStart(() => api.rebootDevice(location), "reboot");
+        break;
+    case "flash":
+        if (!selectedImagePath) {
+            showError("Select a .img first");
+            return;
+        }
+        await runStart(() => api.flashImage(location, selectedImagePath), "flash");
+        break;
+    case "erase": {
+        const ok = await showConfirm(
+            "Quick Erase on " + socLabel(d) + ": erases the partition table and OS, leaving the device " +
+            "unbootable until reflashed. Not a guaranteed secure wipe. Continue?"
+        );
+        if (ok) await runStart(() => api.eraseStorage(location), "erase");
+        break;
+    }
+    case "secure_erase": {
+        const ok = await showConfirm(
+            "Secure Erase on " + socLabel(d) + ": overwrites the entire " + storageLabel(d.selectedStorage) +
+            " with zeros. Can take 15-60+ minutes and cannot be undone. Continue?"
+        );
+        if (ok) await runStart(() => api.secureEraseStorage(location), "secure erase");
+        break;
+    }
+    case "backup":
+        await startBackup(location);
+        break;
+    case "calculate":
+        await calculateUsed(location);
+        break;
+    case "cancel": {
+        const ok = await showConfirm(
+            "Cancel the operation on " + socLabel(d) + "? This may leave the device in an unusable state."
+        );
+        if (ok) {
+            try {
+                await api.cancelFlash(location);
+            } catch (e) {
+                showError((e && e.message) || String(e) || "cancel failed");
+            }
+        }
+        break;
+    }
+    default:
+        break;
+    }
+});
+
+// Per-device storage target change.
+deviceList.addEventListener("change", async (event) => {
+    const sel = event.target.closest("select.dev-storage");
+    if (!sel || !api || !api.selectStorage) {
+        return;
+    }
+    const location = Number(sel.dataset.location);
+    const storage = Number(sel.value);
+    try {
+        const result = await api.selectStorage(location, storage);
+        if (!result || result.started === false) {
+            showError((result && result.error) || "storage selection failed");
+            return;
+        }
+        const d = deviceById(location);
+        if (d) d.selectedStorage = storage;
+        // New target → invalidate cached used space; refresh capacity.
+        delete storageInfoCache[location + ":" + storage];
+        patchStorageLine(location);
+        fetchStorageInfo(location, storage);
+    } catch (e) {
+        showError((e && e.message) || String(e) || "storage selection failed");
+    }
+});
+
+async function runStart(invokeStart, label) {
+    try {
+        const result = await invokeStart();
+        if (!result || result.started === false) {
+            showError((result && result.error) || (label + " failed"));
+            return false;
+        }
+        showError("");
+        return true;
+    } catch (e) {
+        showError((e && e.message) || String(e) || (label + " failed"));
+        return false;
+    }
+}
+
+async function startBackup(location) {
+    if (!api || !api.selectBackupDestination || !api.backupStorage) {
+        showError("backup unavailable");
+        return;
+    }
+    let picked;
+    try {
+        picked = await api.selectBackupDestination();
+    } catch (e) {
+        showError((e && e.message) || String(e) || "backup destination failed");
+        return;
+    }
+    if (!picked || !picked.success) {
+        return;
+    }
+    try {
+        let result = await api.backupStorage(location, picked.path, false);
+        if (result && result.started === false && pickField(result, "needsConfirmation", "needs_confirmation")) {
+            const ok = await showConfirm(result.message);
+            if (!ok) return;
+            result = await api.backupStorage(location, picked.path, true);
+        }
+        if (!result || result.started === false) {
+            showError((result && result.message) || "backup failed");
+        } else {
+            showError("");
+        }
+    } catch (e) {
+        showError((e && e.message) || String(e) || "backup failed");
+    }
+}
+
+async function calculateUsed(location) {
+    if (!api || !api.calculateUsedSpace) {
+        return;
+    }
+    const d = deviceById(location);
+    const card = deviceList.querySelector('.device-card[data-location="' + location + '"]');
+    const msg = card && card.querySelector(".dev-msg");
+    if (msg) {
+        msg.classList.remove("err");
+        msg.textContent = storageLabel(d ? d.selectedStorage : 0) + ": calculating used space…";
+    }
+    try {
+        const result = await api.calculateUsedSpace(location);
+        if (!result || !result.success) {
+            if (msg) { msg.classList.add("err"); msg.textContent = (result && result.error) || "calculate failed"; }
+            return;
+        }
+        const used = Number(pickField(result, "usedBytes", "used_bytes") || 0);
+        const storage = d ? d.selectedStorage : 0;
+        const key = location + ":" + storage;
+        storageInfoCache[key] = Object.assign({ totalBytes: null, usedBytes: used }, storageInfoCache[key]);
+        storageInfoCache[key].usedBytes = used;
+        if (msg) { msg.classList.remove("err"); }
+        patchStorageLine(location);
+    } catch (e) {
+        if (msg) { msg.classList.add("err"); msg.textContent = (e && e.message) || "calculate failed"; }
+    }
+}
+
+// ---- shared image selection + drag/drop ----
+function applyImageSelection(path, sizeBytes) {
+    selectedImagePath = path;
+    selectedImageBytes = Number(sizeBytes || 0);
+    selectedImage.textContent = basename(path) + " (" + formatGiB(selectedImageBytes) + ")";
+    selectedImage.title = path + "\n" + selectedImageBytes.toLocaleString() + " bytes";
+    showError("");
+    renderDeviceList(); // enable Flash buttons
+}
+
+selectImage.addEventListener("click", async () => {
+    if (!api || !api.selectImageFile) {
+        showError("file picker unavailable");
+        return;
+    }
+    const result = await api.selectImageFile();
+    if (!result || !result.success) {
+        return;
+    }
+    applyImageSelection(result.path, pickField(result, "sizeBytes", "size_bytes") || 0);
+});
+
+window.onImageFileDropped = (result) => {
+    if (!result || !result.success || !result.path) {
+        return;
+    }
+    applyImageSelection(result.path, pickField(result, "sizeBytes", "size_bytes") || 0);
 };
 
-// Fired by the background probe once it has finished checking the storage
-// targets the quick connect-time probe skipped.
-window.onStorageTargetsUpdated = () => {
-    refreshStorageTargets();
+window.onImageDragState = (state) => {
+    const overlay = document.getElementById("dropOverlay");
+    if (!overlay) return;
+    const active = !!(state && state.active);
+    const reject = active && !(state && state.valid);
+    overlay.classList.toggle("active", active);
+    overlay.classList.toggle("reject", reject);
+    const text = document.getElementById("dropOverlayText");
+    if (text) {
+        text.textContent = reject ? "Drop a single .img file" : "Drop .img to select";
+    }
 };
 
+window.addEventListener("dragover", (event) => event.preventDefault());
+window.addEventListener("drop", (event) => event.preventDefault());
+
+// ---- log panel ----
 const maxLiveLogLines = 5000;
 let liveLogLineCount = 0;
 let liveLogLastLineStart = 0;
@@ -582,9 +781,7 @@ function resetLiveLogTracking() {
     const value = liveLog.value;
     liveLogLineCount = 0;
     for (let i = 0; i < value.length; i += 1) {
-        if (value[i] === "\n") {
-            liveLogLineCount += 1;
-        }
+        if (value[i] === "\n") liveLogLineCount += 1;
     }
     liveLogLastLineStart = value.length === 0 ? 0 : value.lastIndexOf("\n", value.length - 2) + 1;
 }
@@ -594,30 +791,20 @@ function liveLogAtBottom() {
 }
 
 window.appendLiveLog = (line, replaceLast) => {
-    if (!line) {
-        return;
-    }
-    // Only chase the tail if the user is already there - scrolling up to
-    // read older output mustn't be yanked back down by new lines.
+    if (!line) return;
     const atBottom = liveLogAtBottom();
     if (replaceLast && liveLogLineCount > 0) {
-        // Consecutive progress updates replace the previous line, mirroring
-        // exactly what the log file does.
         liveLog.value = liveLog.value.slice(0, liveLogLastLineStart) + line + "\n";
     } else {
         liveLogLastLineStart = liveLog.value.length;
         liveLog.value += line + "\n";
         liveLogLineCount += 1;
         if (liveLogLineCount > maxLiveLogLines) {
-            // Trim a tenth at a time so the O(buffer) cut is amortized rather
-            // than paid on every appended line.
             const drop = Math.floor(maxLiveLogLines / 10);
             let cut = 0;
             for (let i = 0; i < drop; i += 1) {
                 const next = liveLog.value.indexOf("\n", cut);
-                if (next < 0) {
-                    break;
-                }
+                if (next < 0) break;
                 cut = next + 1;
             }
             liveLog.value = liveLog.value.slice(cut);
@@ -635,7 +822,7 @@ toggleLog.addEventListener("click", () => {
     logPanel.style.display = logVisible ? "block" : "none";
     toggleLog.textContent = logVisible ? "Hide Log" : "Show Log";
     if (logVisible && api && api.getLogContents && !logLoaded && !logCleared) {
-        api.getLogContents().then(result => {
+        api.getLogContents().then((result) => {
             try {
                 liveLog.value = (result && result.text) ? result.text : "";
                 resetLiveLogTracking();
@@ -647,12 +834,6 @@ toggleLog.addEventListener("click", () => {
             }
         });
     }
-});
-
-toggleAdvanced.addEventListener("click", () => {
-    advancedVisible = !advancedVisible;
-    advancedPanel.style.display = advancedVisible ? "block" : "none";
-    toggleAdvanced.textContent = advancedVisible ? "Hide Advanced Options" : "Show Advanced Options";
 });
 
 copyLog.addEventListener("click", async () => {
@@ -674,9 +855,7 @@ clearLog.addEventListener("click", () => {
 
 if (openLogDir) {
     openLogDir.addEventListener("click", async () => {
-        if (!api || !api.openLogDirectory) {
-            return;
-        }
+        if (!api || !api.openLogDirectory) return;
         const result = await api.openLogDirectory();
         if (result && !result.success) {
             showError(result.error || "could not open log folder");
@@ -684,289 +863,38 @@ if (openLogDir) {
     });
 }
 
-function applyImageSelection(path, sizeBytes) {
-    selectedImagePath = path;
-    selectedImage.textContent = basename(path) + " (" + formatGiB(sizeBytes) + ")";
-    selectedImage.title = path + "\n" + Number(sizeBytes || 0).toLocaleString() + " bytes";
-    flashStatus.textContent = "image selected";
-    showError("");
-    render();
+// ---- device access (driver / udev) ----
+function setDriverInstallRunning(running) {
+    driverInstallRunning = running;
+    if (installDriver) installDriver.disabled = running;
+    if (running) driverStatus.textContent = "Installing... (this may take a while)";
 }
 
-selectImage.addEventListener("click", async () => {
-    if (!api || !api.selectImageFile) {
-        showError("file picker unavailable");
-        return;
-    }
-    const result = await api.selectImageFile();
-    if (!result.success) {
-        flashStatus.textContent = result.error || "file picker canceled";
-        return;
-    }
-    applyImageSelection(result.path, pickField(result, "sizeBytes", "size_bytes") || 0);
-});
-
-// Native host (where supported) delivers OS file drops of a single .img here.
-window.onImageFileDropped = (result) => {
-    if (!result || !result.success || !result.path) {
-        return;
-    }
-    if (flashRunning) {
-        return;
-    }
-    applyImageSelection(result.path, pickField(result, "sizeBytes", "size_bytes") || 0);
-};
-
-// Native drag-drop hover feedback. Fired from Rust because HTML5 drag events
-// don't reach the webview while native drag-drop is enabled.
-window.onImageDragState = (state) => {
-    const overlay = document.getElementById("dropOverlay");
-    if (!overlay) {
-        return;
-    }
-    // Never show the overlay mid-flash - a drop would be ignored anyway.
-    const active = !!(state && state.active) && !flashRunning;
-    const reject = active && !(state && state.valid);
-    overlay.classList.toggle("active", active);
-    overlay.classList.toggle("reject", reject);
-    const text = document.getElementById("dropOverlayText");
-    if (text) {
-        text.textContent = reject ? "Drop a single .img file" : "Drop .img to select";
-    }
-};
-
-// Anything the native drop overlay doesn't claim must not fall through to
-// the webview's default behavior (navigating to the dropped file).
-window.addEventListener("dragover", (event) => event.preventDefault());
-window.addEventListener("drop", (event) => event.preventDefault());
-
-async function startBackgroundOp(label, invokeStart) {
-    setFlashRunning(true);
-    flashProgress.value = 0;
+async function refreshDriverInfo() {
+    if (!api || !api.getDeviceAccessInfo) return;
     try {
-        const result = await invokeStart();
-        if (!result || !result.started) {
-            setFlashRunning(false);
-            flashStatus.textContent = "";
-            showError((result && result.error) || (label + " failed"));
-            return false;
-        }
-        return true;
-    } catch (error) {
-        setFlashRunning(false);
-        flashStatus.textContent = "";
-        showError((error && error.message) || String(error) || (label + " failed"));
-        return false;
-    }
-}
-
-flashImage.addEventListener("click", async () => {
-    if (!api || !api.flashImage) {
-        showError("flash unavailable");
-        return;
-    }
-    if (flashRunning) {
-        return;
-    }
-    currentOperation = "image";
-    currentOperationStorageLabel = selectedStorageLabel();
-    startFlashAnimation("Flashing " + basename(selectedImagePath));
-    flashStatus.title = selectedImagePath;
-    await startBackgroundOp("flash", () => api.flashImage(selectedImagePath));
-});
-
-connectDevice.addEventListener("click", async () => {
-    const disconnecting = lastStatus === "connected";
-    if (!api || (disconnecting ? !api.disconnectDevice : !api.flashBootloader)) {
-        showError((disconnecting ? "disconnect" : "connect") + " unavailable");
-        return;
-    }
-    if (flashRunning) {
-        return;
-    }
-    currentOperation = disconnecting ? "disconnect" : "connect";
-    currentOperationStorageLabel = selectedStorageLabel();
-    startFlashAnimation(disconnecting ? "Disconnecting" : "Connecting");
-    await startBackgroundOp(
-        disconnecting ? "disconnect" : "connect",
-        () => (disconnecting ? api.disconnectDevice() : api.flashBootloader())
-    );
-});
-
-eraseStorage.addEventListener("click", async () => {
-    if (!api || !api.eraseStorage) {
-        showError("erase unavailable");
-        return;
-    }
-    if (flashRunning) {
-        return;
-    }
-    const label = selectedStorageLabel();
-    const confirmed = await showConfirm(
-        "This will erase the " + label + "'s partition table and flashed OS, leaving the device unbootable until " +
-        "reflashed. Note: this is not a guaranteed secure wipe - depending on the device, old data may " +
-        "still be physically recoverable afterward. Continue?"
-    );
-    if (!confirmed) {
-        return;
-    }
-    currentOperation = "erase";
-    currentOperationStorageLabel = label;
-    startFlashAnimation("Erasing " + label);
-    await startBackgroundOp("erase", () => api.eraseStorage());
-});
-
-secureEraseStorage.addEventListener("click", async () => {
-    if (!api || !api.secureEraseStorage) {
-        showError("secure erase unavailable");
-        return;
-    }
-    if (flashRunning) {
-        return;
-    }
-    const label = selectedStorageLabel();
-    const confirmed = await showConfirm(
-        "This will overwrite the entire " + label + " with zeros, physically destroying all data including the " +
-        "flashed OS. This takes significantly longer than Quick Erase (potentially 15-60+ minutes " +
-        "depending on device size and transfer speed) but is a real guarantee rather than relying on the " +
-        "device's own erase command. This cannot be undone. Continue?"
-    );
-    if (!confirmed) {
-        return;
-    }
-    currentOperation = "secure_erase";
-    currentOperationStorageLabel = label;
-    startFlashAnimation("Secure erasing " + label);
-    await startBackgroundOp("secure erase", () => api.secureEraseStorage());
-});
-
-backupStorage.addEventListener("click", async () => {
-    if (!api || !api.selectBackupDestination || !api.backupStorage) {
-        showError("backup unavailable");
-        return;
-    }
-    if (flashRunning) {
-        return;
-    }
-    let picked;
-    try {
-        picked = await api.selectBackupDestination();
-    } catch (error) {
-        showError((error && error.message) || String(error) || "backup destination failed");
-        return;
-    }
-    if (!picked.success) {
-        return;
-    }
-
-    let result;
-    try {
-        result = await api.backupStorage(picked.path, false);
-        if (!result.started && pickField(result, "needsConfirmation", "needs_confirmation")) {
-            const confirmed = await showConfirm(result.message);
-            if (!confirmed) {
+        const info = await api.getDeviceAccessInfo();
+        if (!info || info.kind === "none") return;
+        if (info.kind === "windows_driver") {
+            if (!pickField(info, "deviceRelevant", "device_relevant")) {
+                driverStatus.textContent = info.error || "device not found";
                 return;
             }
-            result = await api.backupStorage(picked.path, true);
-        }
-    } catch (error) {
-        showError((error && error.message) || String(error) || "backup failed");
-        return;
-    }
-
-    if (!result.started) {
-        showError(result.message || "backup failed");
-        return;
-    }
-
-    const label = selectedStorageLabel();
-    currentOperation = "backup";
-    currentOperationStorageLabel = label;
-    setFlashRunning(true);
-    flashProgress.value = 0;
-    startFlashAnimation("Backing up " + label + " → " + basename(picked.path));
-    flashStatus.title = picked.path;
-});
-
-calculateUsed.addEventListener("click", async () => {
-    if (!api || !api.calculateUsedSpace) {
-        return;
-    }
-    if (calculatingUsedSpace || flashRunning) {
-        return;
-    }
-    calculatingUsedSpace = true;
-    renderStorageInfoLine();
-    render();
-    const result = await api.calculateUsedSpace();
-    calculatingUsedSpace = false;
-    if (!result.success) {
-        storageUsedBytes = null;
-        renderStorageInfoLine();
-        showError(result.error || "calculate failed");
-        render();
-        return;
-    }
-    storageUsedBytes = Number(pickField(result, "usedBytes", "used_bytes") || 0);
-    renderStorageInfoLine();
-    render();
-});
-
-if (storageSelector) {
-    storageSelector.addEventListener("change", async () => {
-        if (!api || !api.selectStorage) {
+            driverStatus.textContent = info.ready
+                ? "Driver: " + (info.detail || "libusb-win32")
+                : (info.error || ("Driver: " + (info.detail || "unknown")));
             return;
         }
-        const nextStorage = Number(storageSelector.value);
-        const previousSelected = pickField(storageTargets, "selectedStorage", "selected_storage");
-        const previousStorage = previousSelected
-            ? String(previousSelected)
-            : storageSelector.value;
-        const result = await api.selectStorage(nextStorage);
-        if (!result.started) {
-            storageSelector.value = previousStorage;
-            showError(result.error || "storage selection failed");
-            return;
+        if (info.kind === "linux_udev") {
+            driverStatus.textContent = info.ready
+                ? "udev rules: installed"
+                : (info.error || "udev rules: not installed — flashing may need root");
         }
-        if (storageTargets) {
-            storageTargets.selectedStorage = nextStorage;
-            storageTargets.selected_storage = nextStorage;
-        }
-        calculatingUsedSpace = false;
-        await refreshStorageInfo();
-        render();
-    });
+    } catch (e) { /* best-effort */ }
 }
 
-cancelFlash.addEventListener("click", async () => {
-    if (!flashRunning || !api || !api.cancelFlash) {
-        return;
-    }
-    const confirmed = await showConfirm(
-        "Canceling now will leave the current operation incomplete and may leave the device in an unusable state. Continue?"
-    );
-    if (!confirmed) {
-        return;
-    }
-    try {
-        const result = await api.cancelFlash();
-        // Host should fire onFlashComplete; if cancel couldn't attach to a task
-        // and also failed to unlock, clear the UI so Cancel is never a dead end.
-        if (result && result.started === false && flashRunning) {
-            setFlashRunning(false);
-            flashStatus.textContent = "Cancel failed";
-            showError(result.error || "no flash in progress");
-        }
-    } catch (error) {
-        setFlashRunning(false);
-        showError((error && error.message) || String(error) || "cancel failed");
-    }
-});
-
 async function initDriverInstallUi() {
-    if (!installDriver) {
-        return;
-    }
+    if (!installDriver) return;
     if (!api || !api.getDeviceAccessInfo || !api.installDeviceAccess) {
         installDriver.style.display = "none";
         driverStatus.style.display = "none";
@@ -976,7 +904,7 @@ async function initDriverInstallUi() {
     try {
         const info = await api.getDeviceAccessInfo();
         kind = (info && info.kind) || "none";
-    } catch (error) {
+    } catch (e) {
         kind = "none";
     }
     if (kind === "none") {
@@ -984,114 +912,50 @@ async function initDriverInstallUi() {
         driverStatus.style.display = "none";
         return;
     }
-    if (kind === "linux_udev") {
-        installDriver.textContent = "Install udev rules";
-    } else if (kind === "windows_driver") {
-        installDriver.textContent = "Install libusb-win32";
-    }
+    installDriver.textContent = kind === "linux_udev" ? "Install udev rules" : "Install libusb-win32";
     refreshDriverInfo();
     installDriver.addEventListener("click", async () => {
-        if (driverInstallRunning) {
-            return;
-        }
+        if (driverInstallRunning) return;
         setDriverInstallRunning(true);
         if (kind === "linux_udev") {
             driverStatus.textContent = "Installing udev rules... (system authorization required)";
         }
         const result = await api.installDeviceAccess(driverDeviceName);
-        if (!result.started) {
+        if (!result || !result.started) {
             setDriverInstallRunning(false);
-            driverStatus.textContent = result.error || "install already in progress";
+            driverStatus.textContent = (result && result.error) || "install already in progress";
         }
     });
 }
 
-initDriverInstallUi();
-
 window.onDriverInstallComplete = (result) => {
     setDriverInstallRunning(false);
-    if (!result || !result.success) {
-        driverStatus.textContent = (result && result.error) || "install failed";
-    } else {
-        driverStatus.textContent = "installed";
-    }
+    driverStatus.textContent = (!result || !result.success)
+        ? ((result && result.error) || "install failed")
+        : "installed";
     refreshDriverInfo();
 };
 
-window.onFlashComplete = async (result) => {
-    const operation = currentOperation;
-    currentOperation = null;
-    setFlashRunning(false);
-
-    const storageLbl = currentOperationStorageLabel || "eMMC";
-    const label = operation === "erase" ? "Erase " + storageLbl
-        : operation === "secure_erase" ? "Secure Erase"
-        : operation === "connect" ? "Connect"
-        : operation === "disconnect" ? "Disconnect"
-        : operation === "backup" ? "Backup " + storageLbl
-        : "Flash " + storageLbl;
-
-    if (result && result.cancelled) {
-        flashProgress.value = 0;
-        flashStatus.textContent = label + " canceled";
-        await showAlert(label + " was canceled.");
+async function refreshDependencyWarning() {
+    if (!api || !api.getDependencyStatus) {
+        setDependencyWarning("");
         return;
     }
-    if (!result || !result.success) {
-        flashProgress.value = 0;
-        const error = (result && result.error) || "flash failed";
-        flashStatus.textContent = label + " failed";
-        showError(error);
-        await showAlert(label + " failed: " + error);
-        return;
+    try {
+        const status = await api.getDependencyStatus();
+        setDependencyWarning(status && status.warning ? status.warning : "");
+    } catch (e) {
+        setDependencyWarning("Required dependency is missing - keep the application files together and reinstall if needed.");
     }
-
-    if (operation === "connect") {
-        // The bootloader download is an internal step, not a user-facing
-        // "flash" — the status dot turning green (once polling picks up
-        // Loader mode) is the only feedback needed for a successful connect.
-        flashStatus.textContent = "";
-    } else if (operation === "disconnect") {
-        flashStatus.textContent = "Disconnected";
-    } else if (operation === "erase") {
-        flashStatus.textContent = "Erase completed";
-        await showAlert("Erase " + storageLbl + " completed successfully.");
-    } else if (operation === "secure_erase") {
-        flashStatus.textContent = "Secure erase completed";
-        await showAlert("Secure Erase completed successfully - the entire " + storageLbl + " has been overwritten with zeros.");
-    } else if (operation === "backup") {
-        flashStatus.textContent = "Backup completed";
-        await showAlert("Backup " + storageLbl + " completed successfully.");
-    } else {
-        flashStatus.textContent = "Flash completed";
-        await showAlert("Flash " + storageLbl + " completed successfully.");
-    }
-    if (operation !== "disconnect" && lastStatus === "connected") {
-        scheduleStorageRefresh();
-    }
-};
-
-window.updateFlashProgress = (percent) => {
-    const value = Math.max(0, Math.min(100, percent || 0));
-    flashProgress.value = value;
-    flashPercent = value;
-    updateFlashStatusText();
-};
+}
 
 window.onQuitDuringOperation = async () => {
-    // The native window won't actually close on its own while a flash/erase/
-    // backup is running (see window::event::close on the C++ side) - closing
-    // mid-operation can leave the storage half-written or the device stuck
-    // needing a reflash. Ask first; forceCloseWindow only fires if the user
-    // confirms, and re-closing at that point is allowed through.
-    if (quitPromptShowing) {
-        return;
-    }
+    if (quitPromptShowing) return;
     quitPromptShowing = true;
     try {
         const ok = await showConfirm(
-            "A flash, erase, or backup is still in progress. Quitting now may leave the storage " +
-            "partially written or the device needing to be reflashed. Quit anyway?"
+            "A flash, erase, or backup is still in progress. Quitting now may leave a device " +
+            "partially written or needing to be reflashed. Quit anyway?"
         );
         if (ok && api && api.forceCloseWindow) {
             api.forceCloseWindow();
@@ -1104,10 +968,11 @@ window.onQuitDuringOperation = async () => {
 window.addEventListener("load", () => {
     setTimeout(() => {
         refreshDependencyWarning();
+        initDriverInstallUi();
         if (api && api.uiReady) {
             api.uiReady();
         }
     }, 0);
 });
 
-render();
+renderDeviceList();

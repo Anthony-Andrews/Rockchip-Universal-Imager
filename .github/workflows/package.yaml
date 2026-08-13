@@ -1,17 +1,23 @@
 # Full distribution pipeline: compile companions + app, then package per OS/arch.
 #
 #   package.yaml
-#     ├─ build-rkdeveloptool → rkdeveloptool-<os>-<arch>
-#     ├─ build-app           → app-<os>-<arch>  (.app on macOS)
-#     └─ package matrix (6 cells) → per-cell portable zip + real installer
+#     ├─ build-rkdeveloptool → rkdeveloptool-<os>-<arch>   (make, static libusb)
+#     ├─ build-app           → app-<os>-<arch>             (cargo tauri build)
+#     └─ package matrix (6 cells): stage app + rkdeveloptool + loader_binaries/
+#        into one folder → portable zip + real installer
 #
 # Portable (one zip per OS/arch): app + rkdeveloptool + loader_binaries only
 #   (no portable marker, no README)
 #
 # Installer (one file per OS/arch):
-#   Windows → NSIS setup.exe
-#   macOS   → DMG (.app + rkdeveloptool + loader_binaries/ + Applications link)
+#   Windows → NSIS setup.exe (self-host-ci/windows/installer.nsi)
+#   macOS   → DMG ("Rockchip Universal Imager/" folder with .app + rkdeveloptool
+#             + loader_binaries/ inside, + Applications link; drag the folder)
 #   Linux   → .deb under /opt/rockchip-universal-imager
+#
+# macOS signing: configure repo secrets MACOS_SIGN_IDENTITY (+ notary auth:
+# MACOS_NOTARY_KEYCHAIN_PROFILE or APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID).
+# Unset secrets → ad-hoc signature, unsigned distribution (dev builds).
 #
 # Logs always use OS user log dirs (see src-tauri/src/logging.rs).
 
@@ -44,6 +50,18 @@ jobs:
     defaults:
       run:
         shell: ${{ matrix.shell }}
+    env:
+      OS_LABEL: ${{ matrix.os_label }}
+      ARCH_LABEL: ${{ matrix.arch_label }}
+      APP_NAME: ${{ matrix.app_name }}
+      RK_NAME: ${{ matrix.rk_name }}
+      PRODUCT_NAME: Rockchip Universal Imager
+      # macOS only; empty secrets fall back to ad-hoc signing.
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      MACOS_NOTARY_KEYCHAIN_PROFILE: ${{ secrets.MACOS_NOTARY_KEYCHAIN_PROFILE }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -101,20 +119,260 @@ jobs:
           name: app-${{ matrix.os_label }}-${{ matrix.arch_label }}
           path: dist/in/app-${{ matrix.os_label }}-${{ matrix.arch_label }}
 
-      - name: Package portable + installer
-        env:
-          OS_LABEL: ${{ matrix.os_label }}
-          ARCH_LABEL: ${{ matrix.arch_label }}
-          APP_NAME: ${{ matrix.app_name }}
-          RK_NAME: ${{ matrix.rk_name }}
+      # Assemble the install folder every distributable ships:
+      #   app + rkdeveloptool + loader_binaries/
+      # macOS binaries are signed here in the stage, so the portable zip and
+      # the DMG carry identical signed bits.
+      - name: Stage install folder
         run: |
           set -euo pipefail
-          source packaging/ci/ci-env.sh
-          cd "$(ci_workspace)"
+          source self-host-ci/sanitize.sh
+          WS="$(ci_workspace)"
+          cd "$WS"
           ci_setup_toolchain_path "$OS_LABEL"
-          # Ensure zip / dpkg / hdiutil / makensis available on PATH where relevant
-          chmod +x packaging/ci/package-cell.sh
-          packaging/ci/package-cell.sh
+
+          app_dir="$WS/dist/in/app-${OS_LABEL}-${ARCH_LABEL}"
+          rk_dir="$WS/dist/in/rkdeveloptool-${OS_LABEL}-${ARCH_LABEL}"
+          test -d "$app_dir" || { echo "ERROR: missing app artifact $app_dir" >&2; exit 1; }
+          test -d "$rk_dir" || { echo "ERROR: missing rkdeveloptool artifact $rk_dir" >&2; exit 1; }
+
+          rk_bin="$rk_dir/$RK_NAME"
+          if [[ ! -f "$rk_bin" ]]; then
+            rk_bin="$(find "$rk_dir" -maxdepth 3 -type f -name "$RK_NAME" | head -1)"
+          fi
+          test -f "$rk_bin"
+
+          STAGE="$WS/dist/out/staging/${OS_LABEL}-${ARCH_LABEL}"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/loader_binaries"
+          cp -R dependencies/loader_binaries/. "$STAGE/loader_binaries/"
+
+          if [[ "$OS_LABEL" == "macos" ]]; then
+            app_src="$app_dir/${PRODUCT_NAME}.app"
+            if [[ ! -d "$app_src" ]]; then
+              app_src="$(find "$app_dir" -maxdepth 3 -type d -name '*.app' | head -1)"
+            fi
+            test -d "$app_src"
+            cp -R "$app_src" "$STAGE/"
+            if [[ "$(basename "$app_src")" != "${PRODUCT_NAME}.app" ]]; then
+              mv "$STAGE/$(basename "$app_src")" "$STAGE/${PRODUCT_NAME}.app"
+            fi
+            cp "$rk_bin" "$STAGE/$RK_NAME"
+            chmod +x "$STAGE/$RK_NAME"
+
+            # GitHub Actions artifacts strip Unix execute bits. Without +x,
+            # LaunchServices fails with "The application can't be opened".
+            app_macos="$STAGE/${PRODUCT_NAME}.app/Contents/MacOS"
+            find "$app_macos" -type f -exec chmod u+x {} +
+            chmod +x "$app_macos/$APP_NAME"
+
+            # Re-sign after permission mutations. With MACOS_SIGN_IDENTITY set,
+            # sign for real (hardened runtime + timestamp — notarization
+            # requirements); otherwise ad-hoc.
+            if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
+              codesign --force --options runtime --timestamp \
+                --sign "$MACOS_SIGN_IDENTITY" "$STAGE/$RK_NAME"
+              codesign --force --options runtime --timestamp \
+                --sign "$MACOS_SIGN_IDENTITY" "$STAGE/${PRODUCT_NAME}.app"
+            else
+              codesign --force --sign - "$STAGE/$RK_NAME"
+              codesign --force --deep --sign - "$STAGE/${PRODUCT_NAME}.app"
+            fi
+            codesign --verify --verbose=2 "$STAGE/${PRODUCT_NAME}.app"
+          else
+            app_bin="$app_dir/$APP_NAME"
+            if [[ ! -f "$app_bin" ]]; then
+              app_bin="$(find "$app_dir" -maxdepth 3 -type f -name "$APP_NAME" | head -1)"
+            fi
+            test -f "$app_bin"
+            cp "$app_bin" "$STAGE/$APP_NAME"
+            chmod +x "$STAGE/$APP_NAME" 2>/dev/null || true
+            cp "$rk_bin" "$STAGE/$RK_NAME"
+            chmod +x "$STAGE/$RK_NAME" 2>/dev/null || true
+          fi
+
+          echo "staged install folder:"
+          ls -la "$STAGE"
+
+          # Version: single source of truth is tauri.conf.json.
+          VERSION="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+            src-tauri/tauri.conf.json | head -1)"
+          {
+            echo "STAGE=$STAGE"
+            echo "VERSION=${VERSION:-0.0.0}"
+          } >>"$GITHUB_ENV"
+
+      - name: Create portable zip
+        run: |
+          set -euo pipefail
+          source self-host-ci/sanitize.sh
+          WS="$(ci_workspace)"
+          cd "$WS"
+          ci_setup_toolchain_path "$OS_LABEL"
+
+          port_name="rockchip-universal-imager-portable-${OS_LABEL}-${ARCH_LABEL}"
+          out_dir="$WS/dist/out/portable"
+          rm -rf "$out_dir/_tree/$port_name"
+          mkdir -p "$out_dir/_tree"
+          cp -R "$STAGE" "$out_dir/_tree/$port_name"
+          rm -f "$out_dir/$port_name.zip"
+          (
+            cd "$out_dir/_tree"
+            zip -r "$out_dir/$port_name.zip" "$port_name"
+          )
+          ls -la "$out_dir/$port_name.zip"
+
+      - name: Build installer (Windows NSIS)
+        if: matrix.os_label == 'windows'
+        run: |
+          set -euo pipefail
+          source self-host-ci/sanitize.sh
+          WS="$(ci_workspace)"
+          cd "$WS"
+          ci_setup_toolchain_path "$OS_LABEL"
+
+          out_exe="$WS/dist/out/installer/rockchip-universal-imager-${OS_LABEL}-${ARCH_LABEL}-setup.exe"
+          mkdir -p "$(dirname "$out_exe")"
+          nsi="$WS/self-host-ci/windows/installer.nsi"
+          test -f "$nsi"
+
+          # winget installs NSIS under Program Files (x86); may not be on PATH
+          export PATH="/c/Program Files (x86)/NSIS:/c/Program Files/NSIS:$PATH"
+          if ! command -v makensis >/dev/null 2>&1; then
+            for c in \
+              "/c/Program Files (x86)/NSIS/makensis.exe" \
+              "/c/Program Files/NSIS/makensis.exe"; do
+              if [[ -f "$c" ]]; then
+                makensis() { "$c" "$@"; }
+                break
+              fi
+            done
+          fi
+          if ! command -v makensis >/dev/null 2>&1 && ! type makensis >/dev/null 2>&1; then
+            echo "ERROR: makensis not found. Install NSIS on the Windows runner:" >&2
+            echo "  winget install NSIS.NSIS" >&2
+            exit 1
+          fi
+
+          stage_win="$STAGE"
+          out_win="$out_exe"
+          nsi_win="$nsi"
+          if command -v cygpath >/dev/null 2>&1; then
+            stage_win="$(cygpath -w "$STAGE")"
+            out_win="$(cygpath -w "$out_exe")"
+            nsi_win="$(cygpath -w "$nsi")"
+          fi
+          makensis -V2 \
+            "-DSTAGE_DIR=$stage_win" \
+            "-DOUT_EXE=$out_win" \
+            "$nsi_win"
+          test -f "$out_exe"
+          echo "installer -> $out_exe"
+
+      # Drag-install, KiCad-style: the DMG holds one "Rockchip Universal Imager/"
+      # folder (.app + rkdeveloptool + loader_binaries/ inside, signed in the
+      # stage above) plus an Applications link. Users drag the whole folder;
+      # paths.rs finds companions beside the .app.
+      - name: Build installer (macOS DMG)
+        if: matrix.os_label == 'macos'
+        run: |
+          set -euo pipefail
+          source self-host-ci/sanitize.sh
+          WS="$(ci_workspace)"
+          cd "$WS"
+
+          out_dmg="$WS/dist/out/installer/rockchip-universal-imager-${OS_LABEL}-${ARCH_LABEL}.dmg"
+          mkdir -p "$(dirname "$out_dmg")"
+          dmg_root="$WS/dist/out/installer/_dmg-${OS_LABEL}-${ARCH_LABEL}"
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root/$PRODUCT_NAME"
+          cp -R "$STAGE/${PRODUCT_NAME}.app" "$dmg_root/$PRODUCT_NAME/"
+          cp "$STAGE/$RK_NAME" "$dmg_root/$PRODUCT_NAME/"
+          chmod +x "$dmg_root/$PRODUCT_NAME/$RK_NAME" 2>/dev/null || true
+          cp -R "$STAGE/loader_binaries" "$dmg_root/$PRODUCT_NAME/"
+          ln -sf /Applications "$dmg_root/Applications"
+          rm -f "$out_dmg"
+          hdiutil create \
+            -volname "$PRODUCT_NAME" \
+            -srcfolder "$dmg_root" \
+            -ov -format UDZO \
+            "$out_dmg"
+          test -f "$out_dmg"
+          rm -rf "$dmg_root"
+
+          # Sign + notarize the DMG itself when credentials are available.
+          if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
+            codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$out_dmg"
+            notary_args=()
+            if [[ -n "${MACOS_NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+              notary_args=(--keychain-profile "$MACOS_NOTARY_KEYCHAIN_PROFILE")
+            elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+              notary_args=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+            fi
+            if [[ ${#notary_args[@]} -gt 0 ]]; then
+              xcrun notarytool submit "$out_dmg" --wait "${notary_args[@]}"
+              xcrun stapler staple "$out_dmg"
+              # The portable zip holds the same signed binaries; notarizing the
+              # DMG registers their hashes, so Gatekeeper accepts the zip too.
+            else
+              echo "NOTE: DMG signed but NOT notarized (no notary credentials)" >&2
+            fi
+          fi
+          echo "installer -> $out_dmg"
+
+      - name: Build installer (Linux deb)
+        if: matrix.os_label == 'linux'
+        run: |
+          set -euo pipefail
+          source self-host-ci/sanitize.sh
+          WS="$(ci_workspace)"
+          cd "$WS"
+
+          out_deb="$WS/dist/out/installer/rockchip-universal-imager-${OS_LABEL}-${ARCH_LABEL}.deb"
+          mkdir -p "$(dirname "$out_deb")"
+          deb_root="$WS/dist/out/installer/_deb-${OS_LABEL}-${ARCH_LABEL}"
+          rm -rf "$deb_root"
+          install_root="$deb_root/opt/rockchip-universal-imager"
+          mkdir -p "$install_root" "$deb_root/DEBIAN" \
+            "$deb_root/usr/share/applications" \
+            "$deb_root/usr/bin"
+
+          cp "$STAGE/$APP_NAME" "$install_root/"
+          cp "$STAGE/$RK_NAME" "$install_root/"
+          cp -R "$STAGE/loader_binaries" "$install_root/"
+          chmod 755 "$install_root/$APP_NAME" "$install_root/$RK_NAME"
+
+          # PATH shim
+          ln -sf /opt/rockchip-universal-imager/"$APP_NAME" \
+            "$deb_root/usr/bin/rockchip-universal-imager"
+
+          cat >"$deb_root/usr/share/applications/rockchip-universal-imager.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Rockchip Universal Imager
+          Comment=Rockchip flashing and eMMC helper
+          Exec=/opt/rockchip-universal-imager/${APP_NAME}
+          Terminal=false
+          Categories=Utility;Development;
+          EOF
+
+          arch_deb="amd64"
+          [[ "$ARCH_LABEL" == "aarch64" ]] && arch_deb="arm64"
+          cat >"$deb_root/DEBIAN/control" <<EOF
+          Package: rockchip-universal-imager
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: ${arch_deb}
+          Maintainer: Rockchip Universal Imager
+          Description: Rockchip flashing and eMMC helper
+           Cross-platform Rockchip USB flashing utility (Tauri GUI + rkdeveloptool).
+          EOF
+
+          dpkg-deb --build --root-owner-group "$deb_root" "$out_deb"
+          test -f "$out_deb"
+          echo "installer -> $out_deb"
+          rm -rf "$deb_root"
 
       - name: Upload portable package
         uses: actions/upload-artifact@v5

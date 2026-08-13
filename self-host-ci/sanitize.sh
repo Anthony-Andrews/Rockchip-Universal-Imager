@@ -1,10 +1,10 @@
 # Shared path/env helpers for CI bash steps (Linux / macOS / MSYS2 Windows).
-# Part of packaging/ (same family as bootstrap-build-deps.* scripts).
+# Part of self-host-ci/ (same family as bootstrap-build-deps.* scripts).
 #
-#   source packaging/ci/ci-env.sh
+#   source self-host-ci/sanitize.sh
 #
 # Goals:
-#   - No hard dependency on OneDrive / Desktop / a fixed drive letter
+#   - No hard dependency on Desktop / a fixed drive letter
 #   - Discover MSYS2 / llvm-mingw / Homebrew via env + common locations
 #   - Normalize Windows paths to Unix form for bash
 #   - Pure bash only at bootstrap (GHA uses bash --noprofile --norc; tr/cygpath
@@ -134,7 +134,7 @@ ci_to_unix_path() {
 ci_workspace() {
   # 1) Prefer pwd when we are already in the repo (most reliable under MSYS2).
   #    Actions sets the step working directory to GITHUB_WORKSPACE.
-  if [[ -f packaging/ci/ci-env.sh || -f .github/workflows/build-rkdeveloptool.yaml || -d .git || -f .git ]]; then
+  if [[ -f self-host-ci/sanitize.sh || -f .github/workflows/build-rkdeveloptool.yaml || -d .git || -f .git ]]; then
     if command -v pwd >/dev/null 2>&1; then
       local here
       here="$(pwd -P 2>/dev/null || pwd)"
@@ -244,13 +244,13 @@ ci_setup_toolchain_path() {
         ci_path_prepend "$msys/mingw64/bin"
         export ACLOCAL_PATH="${msys}/usr/share/aclocal:${msys}/mingw64/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"
         export PKG_CONFIG_PATH="${msys}/mingw64/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-        echo "ci-env: MSYS2_ROOT_UNIX=$msys"
+        echo "sanitize: MSYS2_ROOT_UNIX=$msys"
       else
-        echo "ci-env: WARNING: MSYS2 root not found (set MSYS2_ROOT)" >&2
+        echo "sanitize: WARNING: MSYS2 root not found (set MSYS2_ROOT)" >&2
       fi
 
       if [[ "${CI_SKIP_LLVM_MINGW:-0}" == "1" ]]; then
-        echo "ci-env: skipping llvm-mingw on PATH (CI_SKIP_LLVM_MINGW=1)"
+        echo "sanitize: skipping llvm-mingw on PATH (CI_SKIP_LLVM_MINGW=1)"
       else
         llvm="$(ci_find_llvm_mingw_root || true)"
         if [[ -n "$llvm" ]]; then
@@ -261,9 +261,9 @@ ci_setup_toolchain_path() {
             *":$llvm/bin:"*) ;;
             *) export PATH="${PATH:+$PATH:}$llvm/bin" ;;
           esac
-          echo "ci-env: LLVM_MINGW_ROOT_UNIX=$llvm (appended to PATH)"
+          echo "sanitize: LLVM_MINGW_ROOT_UNIX=$llvm (appended to PATH)"
         else
-          echo "ci-env: WARNING: llvm-mingw not found (set LLVM_MINGW_ROOT) - windows-aarch64 rkdeveloptool may fail" >&2
+          echo "sanitize: WARNING: llvm-mingw not found (set LLVM_MINGW_ROOT) - windows-aarch64 rkdeveloptool may fail" >&2
         fi
       fi
 
@@ -312,7 +312,7 @@ ci_prefer_windows_msvc_host() {
   rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc 2>/dev/null || true
   # Clear mingw-oriented CC that may be inherited from the runner env
   unset CC CXX CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER || true
-  echo "ci-env: host toolchain $(rustup show active-toolchain 2>/dev/null || true)"
+  echo "sanitize: host toolchain $(rustup show active-toolchain 2>/dev/null || true)"
 }
 
 # Append a directory to GITHUB_PATH so later Actions steps inherit it.
@@ -396,7 +396,7 @@ ci_ensure_rust() {
   ci_ensure_cargo_path
 
   if ! command -v rustup >/dev/null 2>&1; then
-    echo "ci-env: installing rustup…"
+    echo "sanitize: installing rustup…"
     local default_tc=stable
     # Windows self-hosted: install MSVC host (Tauri expects msvc, not gnu).
     if [[ -n "${WINDIR:-}${windir:-}${USERPROFILE:-}" ]] || [[ "$(uname -s 2>/dev/null || true)" == MINGW* || "$(uname -s 2>/dev/null || true)" == MSYS* ]]; then
@@ -439,7 +439,7 @@ ci_ensure_rust() {
   # Prefer rustup-managed rustc when "rustc" is a broken shim
   local rustc_bin
   rustc_bin="$(rustup which rustc 2>/dev/null || command -v rustc)"
-  echo "ci-env: rustc=$rustc_bin"
+  echo "sanitize: rustc=$rustc_bin"
   "$rustc_bin" -vV
   cargo -vV
 }

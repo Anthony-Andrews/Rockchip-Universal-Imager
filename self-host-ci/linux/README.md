@@ -6,7 +6,7 @@ On a Debian/Ubuntu self-hosted runner (SSH as a normal sudo user, **not root**):
 
 ```bash
 cd /path/to/hardware-helper
-bash packaging/linux/bootstrap-build-deps.sh
+bash self-host-ci/linux/bootstrap-build-deps.sh
 # optional: --skip-tauri-cli
 # optional (x86_64 host only): --skip-cross
 ```
@@ -24,7 +24,7 @@ ls /etc/apt/sources.list.d/
 sudo find /etc/apt/sources.list.d -iname '*qcom*noble*' -exec mv {} {}.disabled \;
 # also fix duplicate qcom-ppa .list vs .sources if apt warns about that
 sudo apt-get update
-bash packaging/linux/bootstrap-build-deps.sh
+bash self-host-ci/linux/bootstrap-build-deps.sh
 ```
 
 The bootstrap script continues after a failed update when possible, but a clean
@@ -49,10 +49,10 @@ The bootstrap script continues after a failed update when possible, but a clean
 | CLI | `tauri-cli` ^2 (unless `--skip-tauri-cli`) |
 | x86_64 only (optional) | `gcc-aarch64-linux-gnu` + multiarch (legacy cross; not required if you have an ARM64 runner) |
 
-Shared CI helpers: `packaging/ci/ci-env.sh`.
+Shared CI helpers: `self-host-ci/sanitize.sh`.
 
 ## Packaging
 
 - **Portable zip:** app + `rkdeveloptool` + `loader_binaries/`
 - **Installer:** `.deb` → `/opt/rockchip-universal-imager/` + `.desktop` entry  
-  (`Architecture: amd64` or `arm64` from `package-cell.sh`)
+  (`Architecture: amd64` or `arm64`, set by the package job in `package.yaml`)

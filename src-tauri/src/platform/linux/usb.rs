@@ -4,7 +4,7 @@ use std::process::Command;
 
 use crate::platform::flashing::{InstallOptions, InstallResult, Kind, Status};
 
-pub use crate::platform::libusb_hotplug::{start, stop, UsbCallback};
+pub use crate::platform::libusb_hotplug::{start, stop, UsbCallback, UsbDevice};
 
 const RULES_PATH: &str = "/etc/udev/rules.d/99-rockchip-universal-imager-rockchip.rules";
 const RULES_CONTENT: &str = "\

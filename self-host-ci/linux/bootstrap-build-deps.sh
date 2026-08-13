@@ -8,9 +8,9 @@
 #   [self-hosted, Linux, ARM64] — aarch64 host (builds linux-aarch64 natively;
 #                                 app + companion + .deb)
 #
-#   bash packaging/linux/bootstrap-build-deps.sh
-#   bash packaging/linux/bootstrap-build-deps.sh --skip-tauri-cli
-#   bash packaging/linux/bootstrap-build-deps.sh --skip-cross   # x86_64 host only
+#   bash self-host-ci/linux/bootstrap-build-deps.sh
+#   bash self-host-ci/linux/bootstrap-build-deps.sh --skip-tauri-cli
+#   bash self-host-ci/linux/bootstrap-build-deps.sh --skip-cross   # x86_64 host only
 #
 # On aarch64 hosts, aarch64-cross packages are skipped automatically (native gcc).
 #
@@ -236,7 +236,7 @@ install_rust() {
       mkdir -p "$HOME/.cargo"
       {
         echo ""
-        echo "# Added by packaging/linux/bootstrap-build-deps.sh"
+        echo "# Added by self-host-ci/linux/bootstrap-build-deps.sh"
         echo "[target.aarch64-unknown-linux-gnu]"
         echo 'linker = "aarch64-linux-gnu-gcc"'
       } >>"$cargo_cfg"

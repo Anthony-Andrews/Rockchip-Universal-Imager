@@ -12,7 +12,7 @@
 #   ./autogen.sh && ./configure && make
 #   needs: libusb-1.0, pkg-config, autoconf/automake/libtool, C++ toolchain
 #
-# Pre-installed expectations (see packaging/*/bootstrap-build-deps.*):
+# Pre-installed expectations (see self-host-ci/*/bootstrap-build-deps.*):
 #   Linux:   build-essential, pkg-config, autoconf, automake, libtool,
 #            libudev-dev; native gcc on each arch host
 #   macOS:   Xcode CLT, pkg-config, automake, autoconf, libtool
@@ -133,8 +133,8 @@ jobs:
 
           # cwd is the job workspace (Actions). Relative source avoids Windows
           # GITHUB_WORKSPACE backslash paths under MSYS.
-          # shellcheck source=packaging/ci/ci-env.sh
-          source packaging/ci/ci-env.sh
+          # shellcheck source=self-host-ci/sanitize.sh
+          source self-host-ci/sanitize.sh
 
           # Prefer Actions GITHUB_WORKSPACE (any drive / OneDrive / etc.), normalized.
           WS="$(ci_workspace)"

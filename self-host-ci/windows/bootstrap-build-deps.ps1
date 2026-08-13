@@ -8,10 +8,10 @@
   Self-hosted selection: [self-hosted, Windows, X64] (any hostname, e.g. Windows-11)
 
     Set-ExecutionPolicy -Scope Process Bypass -Force
-    .\packaging\windows\bootstrap-build-deps.ps1
-    .\packaging\windows\bootstrap-build-deps.ps1 -SkipTauriCli
-    .\packaging\windows\bootstrap-build-deps.ps1 -SkipLlvmMingw
-    .\packaging\windows\bootstrap-build-deps.ps1 -SkipVsBuildTools
+    .\self-host-ci\windows\bootstrap-build-deps.ps1
+    .\self-host-ci\windows\bootstrap-build-deps.ps1 -SkipTauriCli
+    .\self-host-ci\windows\bootstrap-build-deps.ps1 -SkipLlvmMingw
+    .\self-host-ci\windows\bootstrap-build-deps.ps1 -SkipVsBuildTools
 
   ---------------------------------------------------------------------------
   Runner expectations (workflows assume these are pre-installed)
