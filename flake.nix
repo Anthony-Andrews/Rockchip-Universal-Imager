@@ -71,7 +71,17 @@
         rockchip-universal-imager = pkgs.rustPlatform.buildRustPackage {
           pname = "rockchip-universal-imager";
           inherit version;
-          src = self;
+          # Only these paths feed the build. Deliberately NOT `self`: with the
+          # whole repo as src, every commit (docs, CI, flake.nix itself)
+          # changes the store path and invalidates the binary cache.
+          src = nixpkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = nixpkgs.lib.fileset.unions [
+              ./src-tauri
+              ./ui
+              ./dependencies/loader_binaries
+            ];
+          };
 
           cargoRoot = "src-tauri";
           buildAndTestSubdir = "src-tauri";
