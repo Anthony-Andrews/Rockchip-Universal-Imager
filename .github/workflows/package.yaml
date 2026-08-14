@@ -346,6 +346,31 @@ jobs:
           ln -sf /opt/rockchip-universal-imager/"$APP_NAME" \
             "$deb_root/usr/bin/rockchip-universal-imager"
 
+          # udev rule: seated users get access to Rockchip USB devices
+          # (vendor 2207, maskrom/loader) without root. Same rule the Nix
+          # package ships.
+          mkdir -p "$deb_root/lib/udev/rules.d"
+          echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="2207", MODE="0660", TAG+="uaccess"' \
+            >"$deb_root/lib/udev/rules.d/70-rockchip-usb.rules"
+
+          # Reload udev on install/remove so the rule applies without reboot.
+          cat >"$deb_root/DEBIAN/postinst" <<EOF
+          #!/bin/sh
+          set -e
+          if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger --subsystem-match=usb || true
+          fi
+          EOF
+          cat >"$deb_root/DEBIAN/postrm" <<EOF
+          #!/bin/sh
+          set -e
+          if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+          fi
+          EOF
+          chmod 755 "$deb_root/DEBIAN/postinst" "$deb_root/DEBIAN/postrm"
+
           cat >"$deb_root/usr/share/applications/rockchip-universal-imager.desktop" <<EOF
           [Desktop Entry]
           Type=Application
