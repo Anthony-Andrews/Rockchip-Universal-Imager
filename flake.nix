@@ -146,6 +146,14 @@
               environment.systemPackages = [ pkg ];
               # Grants seated users access to Rockchip USB devices (uaccess tag).
               services.udev.packages = [ pkg ];
+              # System-level substituter for the prebuilt cache. The flake's
+              # nixConfig prompt only works for trusted users (root-only by
+              # default), which silently falls back to building from source;
+              # declaring it here applies to every user on the machine.
+              nix.settings.substituters = [ "https://antho.cachix.org" ];
+              nix.settings.trusted-public-keys = [
+                "antho.cachix.org-1:NU2YLmMqJD1O221PjtpZU0rBpzaoNesspvyQeBra0yc="
+              ];
             };
           };
         default = rockchip-universal-imager;
