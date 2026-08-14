@@ -871,26 +871,45 @@ function setDriverInstallRunning(running) {
 }
 
 async function refreshDriverInfo() {
-    if (!api || !api.getDeviceAccessInfo) return;
+    if (!api || !api.getDeviceAccessInfo) return null;
     try {
         const info = await api.getDeviceAccessInfo();
-        if (!info || info.kind === "none") return;
+        if (!info || info.kind === "none") return info;
+        // The install button only exists for a reason while access isn't set
+        // up; once ready, hide it (rules/driver installs don't un-happen).
+        if (installDriver) installDriver.style.display = info.ready ? "none" : "";
         if (info.kind === "windows_driver") {
             if (!pickField(info, "deviceRelevant", "device_relevant")) {
                 driverStatus.textContent = info.error || "device not found";
-                return;
+                return info;
             }
             driverStatus.textContent = info.ready
                 ? "Driver: " + (info.detail || "libusb-win32")
                 : (info.error || ("Driver: " + (info.detail || "unknown")));
-            return;
+            return info;
         }
         if (info.kind === "linux_udev") {
             driverStatus.textContent = info.ready
                 ? "udev rules: installed"
                 : (info.error || "udev rules: not installed — flashing may need root");
         }
-    } catch (e) { /* best-effort */ }
+        return info;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function runDriverInstall(kind) {
+    if (driverInstallRunning) return;
+    setDriverInstallRunning(true);
+    if (kind === "linux_udev") {
+        driverStatus.textContent = "Installing udev rules... (system authorization required)";
+    }
+    const result = await api.installDeviceAccess(driverDeviceName);
+    if (!result || !result.started) {
+        setDriverInstallRunning(false);
+        driverStatus.textContent = (result && result.error) || "install already in progress";
+    }
 }
 
 async function initDriverInstallUi() {
@@ -912,20 +931,19 @@ async function initDriverInstallUi() {
         driverStatus.style.display = "none";
         return;
     }
+    // Hidden until refreshDriverInfo() decides; avoids a flash of the button
+    // on systems where access is already set up.
+    installDriver.style.display = "none";
     installDriver.textContent = kind === "linux_udev" ? "Install udev rules" : "Install libusb-win32";
-    refreshDriverInfo();
-    installDriver.addEventListener("click", async () => {
-        if (driverInstallRunning) return;
-        setDriverInstallRunning(true);
-        if (kind === "linux_udev") {
-            driverStatus.textContent = "Installing udev rules... (system authorization required)";
-        }
-        const result = await api.installDeviceAccess(driverDeviceName);
-        if (!result || !result.started) {
-            setDriverInstallRunning(false);
-            driverStatus.textContent = (result && result.error) || "install already in progress";
-        }
-    });
+    installDriver.addEventListener("click", () => runDriverInstall(kind));
+    const info = await refreshDriverInfo();
+    // Linux: rules missing → kick off the install immediately so the polkit
+    // authorization prompt appears on launch. Cancelling leaves the button
+    // visible for a manual retry. (On NixOS the backend returns guidance
+    // instead of prompting — it lands in driverStatus.)
+    if (kind === "linux_udev" && info && !info.ready) {
+        runDriverInstall(kind);
+    }
 }
 
 window.onDriverInstallComplete = (result) => {
