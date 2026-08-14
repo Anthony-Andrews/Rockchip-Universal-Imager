@@ -1,10 +1,11 @@
 {
   # Nix package for NixOS/Linux users:
-  #   nix profile install github:Lux-Robotics/Rockchip-Universal-Imager
-  # or in a NixOS flake config:
-  #   inputs.rockchip-universal-imager.url = "github:Lux-Robotics/Rockchip-Universal-Imager";
-  #   environment.systemPackages = [ inputs.rockchip-universal-imager.packages.${system}.default ];
-  #   services.udev.packages     = [ inputs.rockchip-universal-imager.packages.${system}.default ];
+  #   nix profile install github:Anthony-Andrews/Rockchip-Universal-Imager
+  # or, preferred on NixOS (installs the app AND the udev rule for USB access):
+  #   inputs.rockchip-universal-imager.url = "github:Anthony-Andrews/Rockchip-Universal-Imager";
+  #   # in your system config:
+  #   imports = [ inputs.rockchip-universal-imager.nixosModules.default ];
+  #   programs.rockchip-universal-imager.enable = true;
   #
   # This is an independent from-source build path — it does not consume the
   # CI-built artifacts. Layout mirrors the portable folder: the app,
@@ -110,7 +111,7 @@
 
           meta = {
             description = "Rockchip flashing and eMMC helper (Tauri GUI + rkdeveloptool)";
-            homepage = "https://github.com/Lux-Robotics/Rockchip-Universal-Imager";
+            homepage = "https://github.com/Anthony-Andrews/Rockchip-Universal-Imager";
             # Note: dependencies/loader_binaries contains redistributable
             # Rockchip loader blobs (see the rkbin repository license).
             platforms = pkgs.lib.platforms.linux;
@@ -120,6 +121,24 @@
 
         default = rockchip-universal-imager;
       });
+
+      nixosModules = rec {
+        rockchip-universal-imager = { config, lib, pkgs, ... }:
+          let
+            cfg = config.programs.rockchip-universal-imager;
+            pkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          in
+          {
+            options.programs.rockchip-universal-imager.enable =
+              lib.mkEnableOption "Rockchip Universal Imager (installs the app and the Rockchip USB udev rule)";
+            config = lib.mkIf cfg.enable {
+              environment.systemPackages = [ pkg ];
+              # Grants seated users access to Rockchip USB devices (uaccess tag).
+              services.udev.packages = [ pkg ];
+            };
+          };
+        default = rockchip-universal-imager;
+      };
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
