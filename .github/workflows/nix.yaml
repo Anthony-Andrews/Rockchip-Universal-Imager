@@ -1,10 +1,13 @@
-# Build the Nix package (flake.nix) from source in a clean sandbox.
+# Build the Nix package (flake.nix) from source and push it to the antho
+# Cachix cache, so NixOS devices download prebuilt store paths instead of
+# compiling (small ARM boards OOM on the webkit link otherwise).
 #
-# Independent of the self-hosted matrix: runs on a GitHub-hosted runner, needs
-# no bootstrap. Also serves as a clean-room canary — if this passes, the app
-# builds with nothing but declared dependencies (no Homebrew/MSYS leakage).
+# Runs on the self-hosted Linux runners (x86_64 + aarch64, native each).
+# One-time runner prep: bash self-host-ci/linux/bootstrap-nix.sh
+# Requires repo secret CACHIX_AUTH_TOKEN (write token for the cache).
 #
-# Covers x86_64-linux. aarch64-linux users build from the same flake locally.
+# Also serves as a clean-room canary — if this passes, the app builds with
+# nothing but declared dependencies.
 
 name: Nix
 
@@ -18,31 +21,65 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Client-side flag; avoids editing nix.conf on the runners.
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+
 jobs:
   build:
-    name: nix build (x86_64-linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    name: nix build (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: [self-hosted, Linux, X64]
+            system: x86_64-linux
+          - runner: [self-hosted, Linux, ARM64]
+            system: aarch64-linux
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
+      - name: Ensure Nix on PATH
+        run: |
+          set -euo pipefail
+          if command -v nix >/dev/null 2>&1; then
+            exit 0
+          fi
+          if [ -x /nix/var/nix/profiles/default/bin/nix ]; then
+            echo "/nix/var/nix/profiles/default/bin" >>"$GITHUB_PATH"
+            exit 0
+          fi
+          echo "ERROR: Nix is not installed on this runner." >&2
+          echo "  One-time setup: bash self-host-ci/linux/bootstrap-nix.sh" >&2
+          exit 1
 
-      - name: Flake check (evaluate all systems)
-        run: nix flake check --all-systems --no-build
+      - name: Set up Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: antho
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Runners keep a warm /nix/store between runs; no substituter needed.
+          skipAddingSubstituter: true
+          # We push explicitly below — deterministic, no store-diff surprises.
+          skipPush: true
+
+      - name: Flake check
+        run: nix flake check --no-build
 
       - name: Build package
-        run: nix build -L .#rockchip-universal-imager
+        run: nix build -L .#packages.${{ matrix.system }}.default
 
       - name: Inspect result
         run: |
           set -euo pipefail
-          echo "== closure =="
           ls -la result/bin/
           test -x result/bin/rockchip-universal-imager
           test -e result/bin/rkdeveloptool
           test -d result/bin/loader_binaries
           test -f result/lib/udev/rules.d/70-rockchip-usb.rules
-          result/bin/rkdeveloptool --version || true
+
+      - name: Push to Cachix
+        run: cachix push antho ./result
