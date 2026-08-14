@@ -13,6 +13,17 @@
   # the sibling lookup in src-tauri/src/paths.rs unchanged.
   description = "Rockchip Universal Imager — Rockchip flashing and eMMC helper (Tauri GUI + rkdeveloptool)";
 
+  # Binary cache (pushed by .github/workflows/nix.yaml from the self-hosted
+  # runners). Nix offers this to users on first build; accepting it means
+  # downloading prebuilt paths instead of compiling. NixOS users can instead
+  # set nix.settings.{substituters,trusted-public-keys} declaratively.
+  nixConfig = {
+    extra-substituters = [ "https://antho.cachix.org" ];
+    extra-trusted-public-keys = [
+      "antho.cachix.org-1:NU2YLmMqJD1O221PjtpZU0rBpzaoNesspvyQeBra0yc="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
