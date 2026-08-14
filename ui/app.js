@@ -889,8 +889,10 @@ async function refreshDriverInfo() {
             return info;
         }
         if (info.kind === "linux_udev") {
+            // Working access needs no announcement — show text only when
+            // something requires the user's attention.
             driverStatus.textContent = info.ready
-                ? "udev rules: installed"
+                ? ""
                 : (info.error || "udev rules: not installed — flashing may need root");
         }
         return info;
@@ -948,9 +950,11 @@ async function initDriverInstallUi() {
 
 window.onDriverInstallComplete = (result) => {
     setDriverInstallRunning(false);
+    // Success needs no text — refreshDriverInfo() hides the button and the
+    // status stays empty. Only failures are worth words.
     driverStatus.textContent = (!result || !result.success)
         ? ((result && result.error) || "install failed")
-        : "installed";
+        : "";
     refreshDriverInfo();
 };
 
