@@ -127,6 +127,10 @@
             # services.udev.packages. 2207 = Rockchip vendor ID (maskrom/loader).
             install -Dm644 ${pkgs.writeText "70-rockchip-usb.rules" ''
               SUBSYSTEM=="usb", ATTRS{idVendor}=="2207", MODE="0660", TAG+="uaccess"
+              # Pin Rockchip devices runtime-active: a child that never
+              # autosuspends keeps its parent hub and controller awake, so the
+              # flashing path cannot stall in USB runtime suspend.
+              SUBSYSTEM=="usb", ATTR{idVendor}=="2207", ATTR{power/control}="on"
             ''} $out/lib/udev/rules.d/70-rockchip-usb.rules
           '';
 
