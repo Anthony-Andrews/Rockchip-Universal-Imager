@@ -7,9 +7,9 @@
 // macOS/Linux are fully event-driven: `start(cb)` delivers `(arrived, UsbDevice)`
 // hotplug events; there is no enumeration/polling function.
 #[cfg(target_os = "linux")]
-pub use crate::platform::linux::usb::{start, stop, UsbDevice};
+pub use crate::platform::linux::usb::{reset_device, start, stop, UsbDevice};
 #[cfg(target_os = "macos")]
-pub use crate::platform::macos::usb::{start, stop, UsbDevice};
+pub use crate::platform::macos::usb::{reset_device, start, stop, UsbDevice};
 
 // UsbCallback is the closure type `start` takes; re-exported for completeness,
 // not always named in-tree (callers often build the Arc inline).
@@ -23,7 +23,7 @@ pub use crate::platform::macos::usb::UsbCallback;
 // Windows uses native device notifications + a `ld`-based enumeration (no libusb
 // hotplug); its callback is (present, vid, pid) and detection is poll-driven.
 #[cfg(windows)]
-pub use crate::platform::windows::usb::{start, stop, UsbCallback};
+pub use crate::platform::windows::usb::{reset_device, start, stop, UsbCallback};
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 compile_error!("USB monitoring is only implemented for windows, linux, and macos");

@@ -58,6 +58,38 @@ fn describe<T: UsbContext>(device: &Device<T>) -> Option<UsbDevice> {
     })
 }
 
+/// Bus-level reset (libusb_reset_device) of one Rockchip device by LocationID
+/// ((bus<<8)|port). Recovery tool for a wedged maskrom/loader: killing a
+/// rkdeveloptool that stalled mid-transfer leaves the device's USB state
+/// machine desynced, so every later transfer hangs — and a second aborted
+/// transfer can wedge the BootROM hard enough to need a power cycle. A reset
+/// returns it to a clean, enumerable state (the RAM loader does not survive:
+/// the device comes back in maskrom).
+pub fn reset_device(location: u32) -> Result<(), String> {
+    let ctx = Context::new().map_err(|e| format!("libusb init: {e}"))?;
+    let devices = ctx.devices().map_err(|e| format!("enumerate: {e}"))?;
+    for device in devices.iter() {
+        let loc = ((device.bus_number() as u32) << 8) | (device.port_number() as u32);
+        if loc != location {
+            continue;
+        }
+        let Ok(desc) = device.device_descriptor() else {
+            continue;
+        };
+        if desc.vendor_id() != ROCKCHIP_VID {
+            continue;
+        }
+        let handle = device.open().map_err(|e| format!("open: {e}"))?;
+        return match handle.reset() {
+            Ok(()) => Ok(()),
+            // NotFound: the reset made the device re-enumerate — it happened.
+            Err(rusb::Error::NotFound) => Ok(()),
+            Err(e) => Err(format!("reset: {e}")),
+        };
+    }
+    Err("device not found".into())
+}
+
 struct MonitorState {
     stop: AtomicBool,
     join: Mutex<Option<JoinHandle<()>>>,

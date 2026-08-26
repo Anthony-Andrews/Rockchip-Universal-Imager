@@ -576,13 +576,36 @@ mod app {
         push_device_list_changed(app, state);
     }
 
+    /// A command that should answer in milliseconds hit the probe timeout: the
+    /// loader's USB state machine is wedged (seen on flaky host ports — an
+    /// available storage answers `cs` fine, then the next command hangs).
+    /// Nothing it reports can be trusted and a flash started now would sit at
+    /// 0% forever, so clear the storage state and USB-reset the device back to
+    /// a clean maskrom. Returns the user-facing error for the failed probe.
+    fn probe_wedged(dev: &DeviceState) -> Result<(), String> {
+        logging::write_line(&format!(
+            "[app] storage probe timed out on 0x{:x} — loader wedged, USB-resetting",
+            dev.location
+        ));
+        let msg = reset_wedged_device(dev.location);
+        dev.available_storage_mask.store(0, Ordering::SeqCst);
+        dev.selected_storage.store(0, Ordering::SeqCst);
+        dev.last_storage_sectors.store(0, Ordering::SeqCst);
+        Err(msg)
+    }
+
     /// Probe eMMC/SD/SPI-NOR on one device, pick a default target, cache size.
-    fn probe_storage_targets(dev: &DeviceState) {
+    /// Errors if the loader stopped responding mid-probe (see probe_wedged) —
+    /// the caller must fail its operation, not proceed.
+    fn probe_storage_targets(dev: &DeviceState) -> Result<(), String> {
         let loc = Some(dev.location);
         let _guard = dev.probe_mutex.lock().unwrap();
         let mut mask = 0u32;
         for storage in [STORAGE_EMMC, STORAGE_SD, STORAGE_SPI_NOR] {
             let (res, _) = rkdev::run_sync_output(loc, &["cs", &storage.to_string()]);
+            if res.was_cancelled {
+                return probe_wedged(dev);
+            }
             if res.exit_code == 0 {
                 mask |= storage_bit(storage);
             }
@@ -599,10 +622,16 @@ mod app {
             0
         };
         if selected != 0 {
-            let _ = rkdev::run_sync_output(loc, &["cs", &selected.to_string()]);
+            let (res, _) = rkdev::run_sync_output(loc, &["cs", &selected.to_string()]);
+            if res.was_cancelled {
+                return probe_wedged(dev);
+            }
             dev.selected_storage.store(selected, Ordering::SeqCst);
             // Capture the raw flash info once (shown as the device's tooltip).
-            let (_, rfi) = rkdev::run_sync_output(loc, &["rfi"]);
+            let (rfi_res, rfi) = rkdev::run_sync_output(loc, &["rfi"]);
+            if rfi_res.was_cancelled {
+                return probe_wedged(dev);
+            }
             *dev.flash_info.lock().unwrap() = rfi.trim().to_string();
             // SD capacity from rfi is unreliable — never cache/display it.
             if selected == STORAGE_SD {
@@ -613,7 +642,14 @@ mod app {
             }
         }
         dev.storage_probe_complete.store(true, Ordering::SeqCst);
+        Ok(())
     }
+
+    /// Kill a streaming op after this long with zero output. A healthy wl/rl/ef
+    /// prints a progress line every few seconds even on slow storage; total
+    /// silence means the USB transfer stalled (wedged loader or flaky host
+    /// port) and would otherwise sit at 0% forever.
+    const FLASH_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
     /// Spawn a device-scoped rkdeveloptool operation. Progress and completion are
     /// reported per-device, so many of these can run concurrently on different
@@ -646,10 +682,19 @@ mod app {
         on_device_progress(&app, location, 0);
         push_device_list(&app, &state);
 
+        // Stall watchdog state: on_line refreshes last_activity, the watchdog
+        // thread trips `stalled` and kills the task when it goes quiet, and
+        // on_exit sets `done` (and reads `stalled` to reword the failure).
+        let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+        let stalled = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+
         let last_percent = Arc::new(Mutex::new(-1i32));
         let app_line = app.clone();
         let dev_line = dev.clone();
+        let activity_line = last_activity.clone();
         let on_line = move |line: String| {
+            *activity_line.lock().unwrap() = std::time::Instant::now();
             if let Some(p) = rkdev::parse_progress_percent(&line) {
                 let mut last = last_percent.lock().unwrap();
                 if p != *last {
@@ -665,12 +710,15 @@ mod app {
         let dev_exit = dev.clone();
         let op_owned = op.to_string();
         let cleanup = Mutex::new(cleanup);
+        let stalled_exit = stalled.clone();
+        let done_exit = done.clone();
 
         let task = match rkdev::start(
             Some(location),
             args,
             on_line,
             move |result: ProcessResult| {
+                done_exit.store(true, Ordering::SeqCst);
                 *dev_exit.flash_task.lock().unwrap() = None;
                 if let Ok(mut c) = cleanup.lock() {
                     if let Some(f) = c.take() {
@@ -678,9 +726,17 @@ mod app {
                     }
                 }
 
-                let cancelled = result.was_cancelled;
-                let success =
-                    result.exit_code == 0 && result.error_message.is_empty() && !cancelled;
+                // A stall-kill is a failure, not a user cancel — and the USB
+                // reset that follows it drops the loader, so clear the
+                // connected/storage state (the device returns as fresh maskrom).
+                let was_stalled = stalled_exit.load(Ordering::SeqCst);
+                if was_stalled {
+                    dev_exit.reset_op_state();
+                }
+                let cancelled = result.was_cancelled && !was_stalled;
+                let success = result.exit_code == 0
+                    && result.error_message.is_empty()
+                    && !result.was_cancelled;
 
                 dev_exit.flash_running.store(false, Ordering::SeqCst);
                 *dev_exit.current_op.lock().unwrap() = String::new();
@@ -689,7 +745,15 @@ mod app {
                     .store(if success { 100 } else { -1 }, Ordering::SeqCst);
                 state_exit.active_ops.fetch_sub(1, Ordering::SeqCst);
 
-                let err = if !success && !cancelled {
+                let err = if was_stalled {
+                    format!(
+                        "no progress for {}s — the USB transfer stalled, so the operation \
+                         was aborted and a USB reset attempted. Connect and try again; if \
+                         the device doesn't reappear, unplug and replug it (a different \
+                         USB port may help).",
+                        FLASH_STALL_TIMEOUT.as_secs()
+                    )
+                } else if !success && !cancelled {
                     if result.error_message.is_empty() {
                         format!("rkdeveloptool failed with exit code {}", result.exit_code)
                     } else {
@@ -713,7 +777,36 @@ mod app {
             }
         };
 
-        *dev.flash_task.lock().unwrap() = Some(task);
+        *dev.flash_task.lock().unwrap() = Some(task.clone());
+
+        // Watchdog: kill the op if it goes silent, then USB-reset the device so
+        // it doesn't stay wedged mid-transfer (that state survives the kill and
+        // makes every later transfer hang too). `stalled` is set before the
+        // kill so on_exit reports a stall instead of a cancel.
+        let op_watch = op.to_string();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+                if last_activity.lock().unwrap().elapsed() >= FLASH_STALL_TIMEOUT {
+                    break;
+                }
+            }
+            logging::write_line(&format!(
+                "[app] {op_watch} stalled on 0x{location:x} — no output for {}s; killing and USB-resetting",
+                FLASH_STALL_TIMEOUT.as_secs()
+            ));
+            stalled.store(true, Ordering::SeqCst);
+            task.cancel();
+            // Let the killed child release its USB handle before we open+reset.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            match usb::reset_device(location) {
+                Ok(()) => logging::write_line("[app] USB reset ok — device back in maskrom"),
+                Err(e) => logging::write_line(&format!("[app] USB reset failed: {e}")),
+            }
+        });
         true
     }
 
@@ -722,6 +815,25 @@ mod app {
     /// erase/backup have no timeout — they can legitimately take minutes.)
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     const RESET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// USB-reset a wedged device; log the outcome and return the user-facing
+    /// error message for the operation that just failed (honest about whether
+    /// the reset worked — on Windows it never does and the user must replug).
+    fn reset_wedged_device(location: u32) -> String {
+        match usb::reset_device(location) {
+            Ok(()) => {
+                logging::write_line("[app] USB reset ok — device back in maskrom");
+                "device stopped responding and was USB-reset back to maskrom — try Connect again"
+                    .to_string()
+            }
+            Err(e) => {
+                logging::write_line(&format!("[app] USB reset failed: {e}"));
+                "device stopped responding and could not be USB-reset — unplug and replug it, \
+                 then try Connect again"
+                    .to_string()
+            }
+        }
+    }
 
     /// Run a quick non-streaming reset op (disconnect/reboot) on a worker thread.
     /// Uses run_sync, which retries transient "Creating Comm Object failed" open
@@ -1035,10 +1147,10 @@ mod app {
 
         std::thread::spawn(move || {
             let loc = Some(location);
-            let already_ready = {
+            let (td_timed_out, already_ready) = {
                 let _g = dev.probe_mutex.lock().unwrap();
                 let (res, _) = rkdev::run_sync_output(loc, &["td"]);
-                res.exit_code == 0
+                (res.was_cancelled, res.exit_code == 0)
             };
 
             // Release the claim + emit completion for every Connect exit path.
@@ -1061,6 +1173,19 @@ mod app {
                 return;
             }
 
+            // In both maskrom and loader mode `td` answers within milliseconds
+            // (even "Test Device failed!" is a prompt reply). Hitting the probe
+            // timeout means a wedged loader from an earlier session — a `db`
+            // against it would just burn CONNECT_TIMEOUT and stall too. Reset
+            // it back to maskrom now and have the user reconnect.
+            if td_timed_out {
+                logging::write_line(&format!(
+                    "[app] Connect: td timed out on 0x{location:x} — device wedged, USB-resetting"
+                ));
+                finish(false, false, &reset_wedged_device(location), false);
+                return;
+            }
+
             if already_ready {
                 logging::write_line("[app] Connect: loader already running");
                 {
@@ -1076,7 +1201,10 @@ mod app {
                     finish(false, true, "", false);
                     return;
                 }
-                probe_storage_targets(&dev);
+                if let Err(e) = probe_storage_targets(&dev) {
+                    finish(false, false, &e, false);
+                    return;
+                }
                 if cancel_pending() {
                     finish(false, true, "", true);
                     return;
@@ -1148,7 +1276,15 @@ mod app {
             let db_res = rkdev::run_sync(loc, &["db", loader_str.as_str()], Some(CONNECT_TIMEOUT));
             if db_res.exit_code != 0 || db_res.was_cancelled {
                 let err = if db_res.was_cancelled {
-                    "Connect timed out — device not responding".to_string()
+                    // The timeout kill left the BootROM mid-transfer. Abandoning
+                    // it there is dangerous: its next transfer hangs too, and a
+                    // second aborted download can wedge the BootROM hard enough
+                    // to need a power cycle. Reset it to a clean state now so
+                    // the retry starts fresh.
+                    logging::write_line(&format!(
+                        "[app] Connect: db timed out on 0x{location:x} — USB-resetting"
+                    ));
+                    reset_wedged_device(location)
                 } else if rkdev::is_open_failure(&db_res.error_message) {
                     // The device enumerated (we can see it) but libusb_open kept
                     // failing across retries — almost always a cable/port/board
@@ -1180,7 +1316,10 @@ mod app {
                     }
                 }
             }
-            probe_storage_targets(&dev);
+            if let Err(e) = probe_storage_targets(&dev) {
+                finish(false, false, &e, false);
+                return;
+            }
             finish(true, false, "", true);
         });
 

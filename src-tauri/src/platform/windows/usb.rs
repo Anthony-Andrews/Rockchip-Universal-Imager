@@ -11,6 +11,13 @@ use crate::platform::flashing::{InstallOptions, InstallResult, Kind, Status};
 
 pub type UsbCallback = Arc<dyn Fn(bool, u16, u16) + Send + Sync + 'static>;
 
+/// Bus-level reset of a wedged device (see the unix impl in libusb_hotplug).
+/// Windows detection doesn't link libusb, so recovery there stays manual
+/// (replug the device); callers treat Err as "couldn't reset" and say so.
+pub fn reset_device(_location: u32) -> Result<(), String> {
+    Err("USB reset is not supported on Windows — unplug and replug the device".into())
+}
+
 struct MonitorState {
     stop: AtomicBool,
     join: Mutex<Option<JoinHandle<()>>>,
