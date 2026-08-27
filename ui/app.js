@@ -522,7 +522,10 @@ window.onDeviceOpComplete = (result) => {
     } else if (op === "reboot" || op === "disconnect") {
         delete deviceFlashed[location]; // device is leaving loader mode
     }
-    const msg = successMessage(op);
+    let msg = successMessage(op);
+    if (msg && result.stats) {
+        msg += " — " + result.stats; // e.g. "7.4 GiB in 3m 12s (39.5 MB/s)"
+    }
     if (msg) {
         deviceResults[location] = { text: msg, ok: true };
     } else {

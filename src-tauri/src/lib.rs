@@ -243,7 +243,9 @@ mod app {
         );
     }
 
-    /// One device's operation finished (success / cancelled / error).
+    /// One device's operation finished (success / cancelled / error). `stats`
+    /// is a human-readable size/time/speed summary for successful streaming
+    /// ops ("" when not applicable); the UI appends it to the success message.
     pub fn on_device_op_complete(
         app: &AppHandle,
         location: u32,
@@ -251,13 +253,15 @@ mod app {
         success: bool,
         cancelled: bool,
         error: &str,
+        stats: &str,
     ) {
         let o = serde_json::to_string(op).unwrap_or_else(|_| "\"\"".into());
         let err = serde_json::to_string(error).unwrap_or_else(|_| "\"\"".into());
+        let st = serde_json::to_string(stats).unwrap_or_else(|_| "\"\"".into());
         eval(
             app,
             &format!(
-                "window.onDeviceOpComplete && window.onDeviceOpComplete({{location:{location}, op:{o}, success:{success}, cancelled:{cancelled}, error:{err}}})"
+                "window.onDeviceOpComplete && window.onDeviceOpComplete({{location:{location}, op:{o}, success:{success}, cancelled:{cancelled}, error:{err}, stats:{st}}})"
             ),
         );
     }
@@ -667,6 +671,45 @@ mod app {
     /// port) and would otherwise sit at 0% forever.
     const FLASH_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+    fn format_size(bytes: u64) -> String {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const MIB: f64 = 1024.0 * 1024.0;
+        let b = bytes as f64;
+        if b >= GIB {
+            format!("{:.1} GiB", b / GIB)
+        } else {
+            format!("{:.0} MiB", b / MIB)
+        }
+    }
+
+    fn format_duration(secs: u64) -> String {
+        let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+        if h > 0 {
+            format!("{h}h {m}m {s}s")
+        } else if m > 0 {
+            format!("{m}m {s}s")
+        } else {
+            format!("{s}s")
+        }
+    }
+
+    /// Completion summary for a successful streaming op: "7.4 GiB in 3m 12s
+    /// (39.5 MB/s)", or just "in 3m 12s" when the byte total isn't known
+    /// (quick erase). Speed is decimal MB/s, the convention for transfer rates.
+    fn format_op_stats(total_bytes: Option<u64>, elapsed: std::time::Duration) -> String {
+        let secs = elapsed.as_secs_f64();
+        let dur = format_duration(elapsed.as_secs().max(1));
+        match total_bytes {
+            Some(bytes) if bytes > 0 && secs > 0.0 => format!(
+                "{} in {} ({:.1} MB/s)",
+                format_size(bytes),
+                dur,
+                bytes as f64 / secs / 1_000_000.0
+            ),
+            _ => format!("in {dur}"),
+        }
+    }
+
     /// Spawn a device-scoped rkdeveloptool operation. Progress and completion are
     /// reported per-device, so many of these can run concurrently on different
     /// boards. `op` labels the operation for the UI ("connect", "flash", ...).
@@ -677,6 +720,9 @@ mod app {
         dev: Arc<DeviceState>,
         op: &str,
         args: Vec<String>,
+        // Bytes this op will transfer (image size / storage capacity), for the
+        // completion stats line. None when unknown (quick erase → time only).
+        total_bytes: Option<u64>,
         cleanup: Option<Box<dyn FnOnce() + Send>>,
     ) -> bool {
         if dev
@@ -728,6 +774,7 @@ mod app {
         let cleanup = Mutex::new(cleanup);
         let stalled_exit = stalled.clone();
         let done_exit = done.clone();
+        let op_started = std::time::Instant::now();
 
         let task = match rkdev::start(
             Some(location),
@@ -778,7 +825,16 @@ mod app {
                 } else {
                     String::new()
                 };
-                on_device_op_complete(&app_exit, location, &op_owned, success, cancelled, &err);
+                let stats = if success {
+                    let s = format_op_stats(total_bytes, op_started.elapsed());
+                    logging::write_line(&format!("[app] {op_owned} done (0x{location:x}): {s}"));
+                    s
+                } else {
+                    String::new()
+                };
+                on_device_op_complete(
+                    &app_exit, location, &op_owned, success, cancelled, &err, &stats,
+                );
                 push_device_list(&app_exit, &state_exit);
             },
         ) {
@@ -788,7 +844,7 @@ mod app {
                 *dev.current_op.lock().unwrap() = String::new();
                 dev.progress.store(-1, Ordering::SeqCst);
                 state.active_ops.fetch_sub(1, Ordering::SeqCst);
-                on_device_op_complete(&app, location, op, false, false, &e);
+                on_device_op_complete(&app, location, op, false, false, &e, "");
                 return false;
             }
         };
@@ -900,7 +956,7 @@ mod app {
             } else {
                 res.error_message
             };
-            on_device_op_complete(&app, location, op, success, false, &err);
+            on_device_op_complete(&app, location, op, success, false, &err, "");
             push_device_list(&app, &state);
         });
         true
@@ -1179,7 +1235,7 @@ mod app {
                 dev.progress
                     .store(if success { 100 } else { -1 }, Ordering::SeqCst);
                 state.active_ops.fetch_sub(1, Ordering::SeqCst);
-                on_device_op_complete(&app, location, "connect", success, cancelled, err);
+                on_device_op_complete(&app, location, "connect", success, cancelled, err, "");
                 push_device_list(&app, &state);
             };
             let cancel_pending = || dev.cancel_requested.swap(false, Ordering::SeqCst);
@@ -1473,12 +1529,14 @@ mod app {
             };
         }
         logging::write_line(&format!("[app] Flash Image (0x{location:x}): {image_path}"));
+        let image_bytes = fs::metadata(&path).map(|m| m.len()).ok();
         if !start_flash_task(
             app,
             state.inner().clone(),
             dev,
             "flash",
             vec!["wl".into(), "0".into(), image_path],
+            image_bytes,
             None,
         ) {
             return StartResult {
@@ -1508,6 +1566,7 @@ mod app {
             dev,
             "erase",
             vec!["ef".into()],
+            None,
             None,
         ) {
             return StartResult {
@@ -1615,6 +1674,7 @@ mod app {
                 "0".into(),
                 zero_path.to_string_lossy().into_owned(),
             ],
+            Some(total_sectors * 512),
             Some(Box::new(move || {
                 let _ = fs::remove_file(&zp);
             })),
@@ -1728,6 +1788,7 @@ mod app {
                 main_sectors.to_string(),
                 dest_path,
             ],
+            Some(main_sectors * 512),
             None,
         ) {
             return BackupStartResult {
@@ -1780,7 +1841,7 @@ mod app {
             *dev.current_op.lock().unwrap() = String::new();
             dev.progress.store(-1, Ordering::SeqCst);
             state.active_ops.fetch_sub(1, Ordering::SeqCst);
-            on_device_op_complete(&app, location, "cancel", false, true, "");
+            on_device_op_complete(&app, location, "cancel", false, true, "", "");
             push_device_list(&app, state.inner());
             StartResult {
                 started: true,
