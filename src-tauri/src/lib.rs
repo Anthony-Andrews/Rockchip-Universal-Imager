@@ -1290,18 +1290,41 @@ mod app {
             logging::write_line(&format!("[app] Connect: download boot {}", loader.display()));
             let loader_str = loader.to_string_lossy().into_owned();
             let db_res = rkdev::run_sync(loc, &["db", loader_str.as_str()], Some(CONNECT_TIMEOUT));
-            if db_res.exit_code != 0 || db_res.was_cancelled {
-                let err = if db_res.was_cancelled {
-                    // The timeout kill left the BootROM mid-transfer. Abandoning
-                    // it there is dangerous: its next transfer hangs too, and a
-                    // second aborted download can wedge the BootROM hard enough
-                    // to need a power cycle. Reset it to a clean state now so
-                    // the retry starts fresh.
-                    logging::write_line(&format!(
-                        "[app] Connect: db timed out on 0x{location:x} — USB-resetting"
-                    ));
-                    reset_wedged_device(location)
-                } else if rkdev::is_open_failure(&db_res.error_message) {
+            if db_res.was_cancelled {
+                // A db timeout is not proof of failure: the loader takes over
+                // the USB port mid-command (maskrom→loader re-enumeration), and
+                // if the success reply is lost in that hand-off the transfer
+                // completed but rkdeveloptool hangs waiting for it. The same is
+                // true when the loader was already running (e.g. the app
+                // restarted after a sudden reboot) — db into it hangs. `td`
+                // distinguishes: the BootROM answers it with a prompt failure,
+                // a live loader with OK. Never USB-reset here: a reset cannot
+                // revive a dead device, but it does drop a live loader.
+                logging::write_line(&format!(
+                    "[app] Connect: db timed out on 0x{location:x} — probing whether the loader is up anyway"
+                ));
+                // Let the maskrom→loader re-enumeration settle before probing.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let loader_up = {
+                    let _g = dev.probe_mutex.lock().unwrap();
+                    let (res, _) = rkdev::run_sync_output(loc, &["td"]);
+                    res.exit_code == 0
+                };
+                if !loader_up {
+                    finish(
+                        false,
+                        false,
+                        "Connect timed out — device not responding; power-cycle or replug the \
+                         board, then try Connect again",
+                        false,
+                    );
+                    return;
+                }
+                logging::write_line(
+                    "[app] Connect: loader is running — continuing despite db timeout",
+                );
+            } else if db_res.exit_code != 0 {
+                let err = if rkdev::is_open_failure(&db_res.error_message) {
                     // The device enumerated (we can see it) but libusb_open kept
                     // failing across retries — almost always a cable/port/board
                     // fault rather than the app. See is_open_failure().
