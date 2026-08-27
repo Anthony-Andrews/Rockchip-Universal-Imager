@@ -601,13 +601,29 @@ mod app {
         let loc = Some(dev.location);
         let _guard = dev.probe_mutex.lock().unwrap();
         let mut mask = 0u32;
-        for storage in [STORAGE_EMMC, STORAGE_SD, STORAGE_SPI_NOR] {
+        for storage in [STORAGE_EMMC, STORAGE_SD] {
             let (res, _) = rkdev::run_sync_output(loc, &["cs", &storage.to_string()]);
             if res.was_cancelled {
                 return probe_wedged(dev);
             }
             if res.exit_code == 0 {
                 mask |= storage_bit(storage);
+            }
+        }
+        // Probing SPI NOR is dangerous: `cs` makes the loader actually attempt
+        // the switch (the protocol accepts it even for absent storage — absence
+        // is only detected by reading the selection back), and on at least
+        // rk3588_spl_loader v1.21.114 a failed SPI NOR init poisons the loader:
+        // every later storage command hangs until the board is power-cycled.
+        // Only probe it when neither eMMC nor SD answered — then there is
+        // nothing to lose, and no storage command follows a failed attempt.
+        if mask == 0 {
+            let (res, _) = rkdev::run_sync_output(loc, &["cs", &STORAGE_SPI_NOR.to_string()]);
+            if res.was_cancelled {
+                return probe_wedged(dev);
+            }
+            if res.exit_code == 0 {
+                mask |= storage_bit(STORAGE_SPI_NOR);
             }
         }
         dev.available_storage_mask.store(mask, Ordering::SeqCst);
