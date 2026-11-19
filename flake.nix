@@ -87,6 +87,15 @@
           buildAndTestSubdir = "src-tauri";
           cargoLock.lockFile = ./src-tauri/Cargo.lock;
 
+          # tauri-build refuses to compile unless the sidecar declared in
+          # bundle.externalBin exists for the target; point it at the
+          # Nix-built rkdeveloptool (runs in the source root, before cargo).
+          preBuild = ''
+            mkdir -p src-tauri/binaries
+            ln -sf ${rkdeveloptool}/bin/rkdeveloptool \
+              src-tauri/binaries/rkdeveloptool-${pkgs.stdenv.hostPlatform.rust.rustcTarget}
+          '';
+
           nativeBuildInputs = with pkgs; [
             cargo-tauri.hook
             pkg-config
@@ -115,23 +124,19 @@
           ];
 
           postInstall = ''
-            # Companions beside the executable — same layout as the portable
-            # folder, found via executable_dir() in paths.rs.
-            ln -s ${rkdeveloptool}/bin/rkdeveloptool $out/bin/rkdeveloptool
+            # Companions beside the executable, found via executable_dir() in
+            # paths.rs. (-f: the cargo install hook may already have copied
+            # the sidecar that tauri-build placed in target/release.)
+            ln -sf ${rkdeveloptool}/bin/rkdeveloptool $out/bin/rkdeveloptool
             cp -r ${./dependencies/loader_binaries} $out/bin/loader_binaries
 
             install -Dm644 ${./src-tauri/icons/128x128.png} \
               $out/share/icons/hicolor/128x128/apps/rockchip-universal-imager.png
 
             # USB access without root: NixOS users add this package to
-            # services.udev.packages. 2207 = Rockchip vendor ID (maskrom/loader).
-            install -Dm644 ${pkgs.writeText "70-rockchip-usb.rules" ''
-              SUBSYSTEM=="usb", ATTRS{idVendor}=="2207", MODE="0660", TAG+="uaccess"
-              # Pin Rockchip devices runtime-active: a child that never
-              # autosuspends keeps its parent hub and controller awake, so the
-              # flashing path cannot stall in USB runtime suspend.
-              SUBSYSTEM=="usb", ATTR{idVendor}=="2207", ATTR{power/control}="on"
-            ''} $out/lib/udev/rules.d/70-rockchip-usb.rules
+            # services.udev.packages. Same rule file the .deb/.rpm ship.
+            install -Dm644 ${./src-tauri/linux/70-rockchip-usb.rules} \
+              $out/lib/udev/rules.d/70-rockchip-usb.rules
           '';
 
           meta = {

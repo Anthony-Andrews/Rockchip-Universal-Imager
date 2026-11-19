@@ -2,10 +2,8 @@
 # Cachix cache, so NixOS devices download prebuilt store paths instead of
 # compiling (small ARM boards OOM on the webkit link otherwise).
 #
-# Runs on the self-hosted Linux runners (x86_64 + aarch64, native each).
-# One-time runner prep: bash self-host-ci/linux/bootstrap-nix.sh
-# Requires repo secret CACHIX_AUTH_TOKEN (write token for the cache);
-# cachix itself is fetched per push via `nix run` — nothing to preinstall.
+# Runs on GitHub-hosted runners (x86_64 + aarch64, native each).
+# Requires repo secret CACHIX_AUTH_TOKEN (write token for the cache).
 #
 # Also serves as a clean-room canary — if this passes, the app builds with
 # nothing but declared dependencies.
@@ -22,10 +20,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # Client-side flag; avoids editing nix.conf on the runners.
-  NIX_CONFIG: "experimental-features = nix-command flakes"
-
 jobs:
   build:
     name: nix build (${{ matrix.system }})
@@ -35,27 +29,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: [self-hosted, Linux, X64]
+          - runner: ubuntu-24.04
             system: x86_64-linux
-          - runner: [self-hosted, Linux, ARM64]
+          - runner: ubuntu-24.04-arm
             system: aarch64-linux
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Ensure Nix on PATH
-        run: |
-          set -euo pipefail
-          if command -v nix >/dev/null 2>&1; then
-            exit 0
-          fi
-          if [ -x /nix/var/nix/profiles/default/bin/nix ]; then
-            echo "/nix/var/nix/profiles/default/bin" >>"$GITHUB_PATH"
-            exit 0
-          fi
-          echo "ERROR: Nix is not installed on this runner." >&2
-          echo "  One-time setup: bash self-host-ci/linux/bootstrap-nix.sh" >&2
-          exit 1
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Pushes every store path built in this job to the cache when the job
+      # ends (post step). Skips the push when the token is not configured
+      # (e.g. on forks).
+      - name: Set up Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: antho
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: ${{ secrets.CACHIX_AUTH_TOKEN == '' }}
 
       - name: Flake check
         run: nix flake check --no-build
@@ -71,12 +67,3 @@ jobs:
           test -e result/bin/rkdeveloptool
           test -d result/bin/loader_binaries
           test -f result/lib/udev/rules.d/70-rockchip-usb.rules
-
-      # No cachix-action: on self-hosted runners it installs cachix into a
-      # profile dir that is not on the job PATH and then can't find it.
-      # `nix run` supplies the binary directly and cachix reads the auth
-      # token from the environment.
-      - name: Push to Cachix
-        env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-        run: nix run nixpkgs#cachix -- push antho ./result

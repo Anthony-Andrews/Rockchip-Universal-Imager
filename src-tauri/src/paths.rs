@@ -1,11 +1,29 @@
-//! Resolve app / companion / resource directories (portable-first layout).
+//! Resolve app / companion / resource directories.
 //!
-//! **macOS:** release packaging keeps companions *beside* the `.app`
-//! (`rkdeveloptool` + `loader_binaries/` next to `Rockchip Universal Imager.app`).
-//! Paths also accept companions inside the bundle (`Contents/MacOS`,
-//! `Contents/Resources`) for local/dev convenience.
+//! Release bundles (Tauri bundler, see `tauri.conf.json > bundle`):
+//! - `rkdeveloptool` is a Tauri sidecar and lands *beside the executable*
+//!   (`Contents/MacOS` on macOS, `/usr/bin` for .deb/.rpm/AppImage, the
+//!   install dir on Windows).
+//! - `loader_binaries/` is a bundle resource and lands in Tauri's resource
+//!   dir (`Contents/Resources`, `/usr/lib/<product name>`, or the install dir
+//!   on Windows). The app records that dir at startup via
+//!   [`set_bundle_resource_dir`].
+//!
+//! The legacy portable layout (companions next to the binary / next to the
+//! `.app`) and the Nix layout (everything in `$out/bin`) are still accepted.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// Tauri's resolved resource directory, recorded once from the `setup` hook.
+static BUNDLE_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record Tauri's resolved resource directory (`app.path().resource_dir()`).
+/// Bundles place `loader_binaries/` there. Safe to call more than once; only
+/// the first value is kept.
+pub fn set_bundle_resource_dir(dir: PathBuf) {
+    let _ = BUNDLE_RESOURCE_DIR.set(dir);
+}
 
 pub fn platform_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -152,28 +170,38 @@ pub fn resource_dir() -> PathBuf {
     executable_dir()
 }
 
-/// loader_binaries next to app, in resources, or from repo during dev.
+/// loader_binaries in the Tauri resource dir, next to the app, or from the
+/// repo during dev.
 pub fn loader_binaries_dir() -> PathBuf {
-    // `mut` is only used on macOS (the cfg block below inserts entries).
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut candidates = vec![
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Tauri bundle resource dir (Contents/Resources, /usr/lib/<product>,
+    // $APPDIR/usr/lib/<product>, or the Windows install dir).
+    if let Some(dir) = BUNDLE_RESOURCE_DIR.get() {
+        candidates.push(dir.join("loader_binaries"));
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = app_bundle_root() {
+        candidates.push(bundle.join("Contents/Resources/loader_binaries"));
+        candidates.push(bundle.join("Contents/MacOS/loader_binaries"));
+    }
+
+    candidates.extend([
         // Bundled inside .app (preferred on macOS)
         resource_dir().join("loader_binaries"),
-        // Next to binary (Contents/MacOS or portable binary dir)
+        // Next to binary (Contents/MacOS, Nix $out/bin, portable binary dir)
         executable_dir().join("loader_binaries"),
         // Beside .app / portable root
         companion_dir().join("loader_binaries"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dependencies/loader_binaries"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("loader_binaries"),
-    ];
+    ]);
 
     #[cfg(target_os = "macos")]
-    if let Some(bundle) = app_bundle_root() {
-        candidates.insert(0, bundle.join("Contents/Resources/loader_binaries"));
-        candidates.insert(1, bundle.join("Contents/MacOS/loader_binaries"));
-        if let Some(parent) = bundle.parent() {
-            candidates.push(parent.join("loader_binaries"));
-        }
+    if let Some(parent) = app_bundle_root().and_then(|b| b.parent().map(Path::to_path_buf)) {
+        // Legacy: companions were placed beside the .app
+        candidates.push(parent.join("loader_binaries"));
     }
 
     for c in &candidates {

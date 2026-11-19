@@ -1,46 +1,31 @@
 # CI helpers
 
+All workflows run on GitHub-hosted runners (no self-hosted machines).
+
 | File | Role |
 |------|------|
-| `sanitize.sh` | PATH / workspace helpers for self-hosted bash steps (sourced by all three workflows) |
+| `sanitize.sh` | PATH / workspace helpers for bash steps (Linux / macOS / MSYS2 Windows); sourced by `build-rkdeveloptool.yaml` |
+| `*/bootstrap-build-deps.*` | Reference lists of build dependencies per OS. Useful for setting up a local dev machine; no longer used by CI |
+| `linux/bootstrap-nix.sh` | Installs Nix on a Debian/Ubuntu box (local use) |
 
-All packaging logic lives in the workflows themselves:
+## Pipeline
 
 ```
-package.yaml
-  ├─ build-rkdeveloptool.yaml  → rkdeveloptool-<os>-<arch>   (make, static libusb)
-  ├─ build-app.yaml            → app-<os>-<arch>             (cargo tauri build; .app on macOS)
-  └─ package matrix (6 cells)  → stage folder → portable-* + installer-* artifacts
+release.yaml   (push tag v* → draft GitHub Release; workflow_dispatch → artifacts)
+  ├─ build-rkdeveloptool.yaml  → rkdeveloptool-<os>-<arch>  (autotools, static libusb)
+  └─ app matrix (6 cells)      → tauri-action: cargo tauri build
+       macOS   (macos-15, arm64 native + x86_64 cross) → .app + .dmg
+       Linux   (ubuntu-24.04, ubuntu-24.04-arm)         → .deb + .rpm + .AppImage
+       Windows (windows-2025, windows-11-arm)           → NSIS setup.exe
+
+nix.yaml       (workflow_dispatch) → nix build + push to Cachix (x86_64 + aarch64)
 ```
 
-The package job stages one install folder per cell
-(app + `rkdeveloptool` + `loader_binaries/`), zips it as the portable, then
-builds the OS installer from the same stage.
+`rkdeveloptool` ships inside every bundle as a Tauri sidecar
+(`bundle.externalBin`, see `src-tauri/binaries/README.md`) and
+`dependencies/loader_binaries/` as a bundle resource (`bundle.resources`).
+The `.deb` / `.rpm` also install the Rockchip udev rule from
+`src-tauri/linux/`. Nothing is staged by hand.
 
-### Portable zip contents
-
-- **macOS:** `Rockchip Universal Imager.app` + `rkdeveloptool` + `loader_binaries/`
-- **Linux:** `Rockchip Universal Imager` + `rkdeveloptool` + `loader_binaries/`
-- **Windows:** `Rockchip Universal Imager.exe` + `rkdeveloptool.exe` + `loader_binaries/`
-
-No `portable` marker.
-
-### Installers
-
-| OS | Tool | Output |
-|----|------|--------|
-| Windows | NSIS (`makensis`, `self-host-ci/windows/installer.nsi`) | `*-setup.exe` |
-| macOS | `hdiutil` | `*.dmg` ("Rockchip Universal Imager/" folder + Applications symlink) |
-| Linux | `dpkg-deb` | `*.deb` → `/opt/rockchip-universal-imager` |
-
-macOS signing/notarization is driven by repo secrets — see the header comment
-in `package.yaml`.
-
-### Linux runners
-
-| Product | Runner labels |
-|---------|----------------|
-| `linux-x86_64` | `[self-hosted, Linux, X64]` |
-| `linux-aarch64` | `[self-hosted, Linux, ARM64]` (native app + companion) |
-
-Bootstrap both with `self-host-ci/linux/bootstrap-build-deps.sh`.
+macOS signing and notarization are optional and driven by repo secrets — see
+the header comment in `release.yaml`.

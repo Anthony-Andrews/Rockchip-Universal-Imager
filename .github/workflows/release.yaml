@@ -1,0 +1,169 @@
+# Release pipeline on GitHub-hosted runners.
+#
+#   release.yaml
+#     ├─ rkdeveloptool (build-rkdeveloptool.yaml) → rkdeveloptool-<os>-<arch>
+#     └─ app matrix (6 cells) → tauri-apps/tauri-action: cargo tauri build
+#          macOS   (macos-15, arm64 native + x86_64 cross) → .app + .dmg
+#          Linux   (ubuntu-24.04, ubuntu-24.04-arm)         → .deb + .rpm + .AppImage
+#          Windows (windows-2025, windows-11-arm)           → NSIS setup.exe
+#
+# rkdeveloptool ships inside every bundle as a Tauri sidecar
+# (tauri.conf.json > bundle.externalBin → src-tauri/binaries/) and
+# dependencies/loader_binaries/ as a bundle resource, so nothing is staged by
+# hand. The .deb/.rpm also install the udev rule from src-tauri/linux/.
+#
+# Triggers:
+#   push tag v*        → build every cell, then create/fill a DRAFT GitHub
+#                        Release named after the tag with all bundles attached.
+#   workflow_dispatch  → build only; bundles are uploaded as workflow artifacts
+#                        ([platform]-[arch]-[bundle]).
+#
+# macOS signing + notarization (optional; unset → ad-hoc unsigned build):
+#   APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
+#   APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+#   https://v2.tauri.app/distribute/sign/macos/
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rkdeveloptool:
+    name: Build rkdeveloptool
+    uses: ./.github/workflows/build-rkdeveloptool.yaml
+
+  app:
+    name: app (${{ matrix.os }}-${{ matrix.arch }})
+    needs: rkdeveloptool
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            os: macos
+            arch: aarch64
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - runner: macos-15
+            os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
+          - runner: windows-2025
+            os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - runner: windows-11-arm
+            os: windows
+            arch: aarch64
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Tauri v2 prerequisites for Ubuntu 24.04 (+ libudev for libusb hotplug).
+      - name: Install Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev libudev-dev patchelf file
+
+      - name: Download rkdeveloptool
+        uses: actions/download-artifact@v5
+        with:
+          name: rkdeveloptool-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/in/rkdeveloptool
+
+      # Sidecar naming: binaries/rkdeveloptool-<target-triple>[.exe]
+      - name: Install sidecar
+        shell: bash
+        env:
+          OS: ${{ matrix.os }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          ext=""
+          [[ "$OS" == "windows" ]] && ext=".exe"
+          mkdir -p src-tauri/binaries
+          cp "dist/in/rkdeveloptool/rkdeveloptool${ext}" "src-tauri/binaries/rkdeveloptool-${TARGET}${ext}"
+          chmod +x "src-tauri/binaries/rkdeveloptool-${TARGET}${ext}"
+          ls -la src-tauri/binaries
+
+      # Tauri treats an *empty* APPLE_CERTIFICATE as "import this certificate"
+      # and fails, so only export the signing variables that are populated.
+      - name: Configure Apple signing (when secrets are set)
+        if: matrix.os == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -n "${!v:-}" ]]; then
+              { echo "$v<<__EOF__"; printf '%s\n' "${!v}"; echo "__EOF__"; } >>"$GITHUB_ENV"
+              echo "signing: $v set"
+            fi
+          done
+          [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || echo "signing: no identity configured — ad-hoc unsigned build"
+
+      - name: Build app (tauri-action)
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # On a v* tag: create/reuse a draft release named after the tag.
+          # On workflow_dispatch: empty tagName → build only, no release.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('Rockchip Universal Imager {0}', github.ref_name) || '' }}
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          uploadWorkflowArtifacts: true

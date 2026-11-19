@@ -2259,6 +2259,11 @@ pub fn run() {
             app::calculate_used_space,
         ])
         .setup(|app| {
+            // Bundles put loader_binaries/ in Tauri's resource dir; record it
+            // so paths::loader_binaries_dir() can find it on every platform.
+            if let Ok(dir) = app.path().resource_dir() {
+                paths::set_bundle_resource_dir(dir);
+            }
             let handle = app.handle().clone();
             logging::set_ui_sink(move |line, replace| {
                 app::append_live_log(&handle, &line, replace);

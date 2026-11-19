@@ -1,0 +1,9 @@
+# Rockchip USB devices (vendor 2207: maskrom / loader). Installed by the
+# .deb/.rpm bundles and the Nix package.
+#
+# Seated users get access without root.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2207", MODE="0660", TAG+="uaccess"
+# Pin Rockchip devices runtime-active: a child that never autosuspends keeps
+# its parent hub and controller awake, so the flashing path cannot stall in
+# USB runtime suspend.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2207", ATTR{power/control}="on"

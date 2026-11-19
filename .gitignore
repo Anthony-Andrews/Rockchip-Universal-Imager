@@ -20,3 +20,7 @@ src-tauri/gen/
 # Nix
 result
 result-*
+
+# Tauri sidecar binaries (placed by CI / local dev, see src-tauri/binaries/README.md)
+src-tauri/binaries/*
+!src-tauri/binaries/README.md
